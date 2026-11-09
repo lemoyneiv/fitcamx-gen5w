@@ -3,7 +3,10 @@ build/
 bin/
 gen/
 out/
-dist/
+
+# Archived development releases
+dist/fitcam-dev-releases/
+fitcam-dev-releases/
 
 # Intermediate files
 *.class
