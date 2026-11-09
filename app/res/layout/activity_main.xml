@@ -1,0 +1,608 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:background="@color/bg_dark">
+
+    <!-- ================= LEFT NAVIGATION & STATUS SIDEBAR ================= -->
+    <LinearLayout
+        android:id="@+id/layout_sidebar"
+        android:layout_width="210dp"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:background="@color/bg_panel"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="10dp">
+
+        <!-- Logo / App Title -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:id="@+id/tv_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="FITCAMX"
+                android:textColor="@color/accent_blue"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_app_version"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v0.5.3"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Status & Wi-Fi indicator -->
+        <TextView
+            android:id="@+id/tv_wifi_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/status_disconnected"
+            android:textColor="@color/accent_gold"
+            android:textSize="12sp"
+            android:maxLines="2"
+            android:ellipsize="marquee"
+            android:layout_marginBottom="6dp" />
+
+        <!-- Rescan Button -->
+        <Button
+            android:id="@+id/btn_rescan"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_marginBottom="14dp"
+            android:text="@string/btn_rescan"
+            android:background="@color/bg_button"
+            android:textColor="@color/text_primary"
+            android:textSize="13sp" />
+
+        <!-- Navigation Section Label -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="NAVIGATION"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:layout_marginBottom="6dp" />
+
+        <!-- Mode Switcher Tabs -->
+        <Button
+            android:id="@+id/btn_tab_live"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/tab_live"
+            android:background="@color/accent_blue"
+            android:textColor="@color/text_primary"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btn_tab_gallery"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_marginBottom="12dp"
+            android:text="@string/tab_gallery"
+            android:background="@color/bg_button"
+            android:textColor="@color/text_primary"
+            android:textSize="14sp" />
+
+        <!-- Spacer -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- System & Log Actions -->
+        <Button
+            android:id="@+id/btn_export_log"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_marginBottom="6dp"
+            android:text="Export Log to USB"
+            android:background="#2e4057"
+            android:textColor="@color/accent_gold"
+            android:textStyle="bold"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_exit_app"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_marginBottom="8dp"
+            android:text="@string/btn_exit"
+            android:background="@color/bg_button"
+            android:textColor="@color/accent_green"
+            android:textStyle="bold"
+            android:textSize="13sp" />
+
+        <!-- Diagnostic Bar at bottom of sidebar -->
+        <LinearLayout
+            android:id="@+id/layout_diag_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#151922"
+            android:padding="6dp">
+
+            <TextView
+                android:id="@+id/tv_diag_info"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Status: Initializing..."
+                android:textColor="#99aabb"
+                android:textSize="10sp"
+                android:maxLines="2"
+                android:ellipsize="marquee" />
+
+            <TextView
+                android:id="@+id/tv_diag_tap_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="right"
+                android:text="[Diagnostics]"
+                android:textColor="@color/accent_blue"
+                android:textSize="10sp"
+                android:layout_marginTop="2dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ================= MAIN CONTENT FRAME ================= -->
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1">
+
+        <!-- ================= LIVE VIEW MODE ================= -->
+        <LinearLayout
+            android:id="@+id/layout_live_mode"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:visibility="visible">
+
+            <!-- Video Player Surface (Full 720px Height!) -->
+            <FrameLayout
+                android:id="@+id/frame_live_container"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="#000000">
+
+                <!-- LibVLC Direct Hardware Accelerated Surface (Auto-scaled & Centered) -->
+                <SurfaceView
+                    android:id="@+id/surface_live"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:layout_gravity="center" />
+
+                <!-- Stream Loading / Buffering Indicator -->
+                <ProgressBar
+                    android:id="@+id/pb_live_loading"
+                    android:layout_width="54dp"
+                    android:layout_height="54dp"
+                    android:layout_gravity="center"
+                    android:visibility="visible" />
+
+                <!-- Live Stream Banner Overlay -->
+                <TextView
+                    android:id="@+id/tv_stream_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|left"
+                    android:layout_margin="12dp"
+                    android:background="#99000000"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:text="FRONT (LIVE)"
+                    android:textColor="#ffffff"
+                    android:textSize="13sp" />
+
+                <!-- REC Indicator Badge -->
+                <TextView
+                    android:id="@+id/tv_rec_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|right"
+                    android:layout_margin="12dp"
+                    android:background="#aaee2222"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:text="● REC"
+                    android:textColor="#ffffff"
+                    android:textStyle="bold"
+                    android:textSize="13sp" />
+            </FrameLayout>
+
+            <!-- Live Controls Column (Optimized & Narrowed) -->
+            <LinearLayout
+                android:id="@+id/layout_live_controls"
+                android:layout_width="150dp"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:background="@color/bg_panel"
+                android:padding="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="CAMERA CONTROLS"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp"
+                    android:layout_marginBottom="8dp" />
+
+                <!-- Multi-Mode View Selector (Front / Dual / Rear) -->
+                <Button
+                    android:id="@+id/btn_toggle_cam"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginBottom="6dp"
+                    android:background="@color/accent_blue"
+                    android:text="View: FRONT"
+                    android:textColor="#ffffff"
+                    android:textStyle="bold"
+                    android:textSize="13sp" />
+
+                <!-- Take Snapshot -->
+                <Button
+                    android:id="@+id/btn_snapshot"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginBottom="6dp"
+                    android:background="@color/bg_button"
+                    android:text="@string/btn_snapshot"
+                    android:textColor="@color/text_primary"
+                    android:textSize="13sp" />
+
+                <!-- Emergency Lock Clip -->
+                <Button
+                    android:id="@+id/btn_emergency_lock"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginBottom="6dp"
+                    android:background="@color/accent_gold"
+                    android:text="@string/btn_lock"
+                    android:textColor="#000000"
+                    android:textStyle="bold"
+                    android:textSize="13sp" />
+
+                <!-- Mic Mute / Unmute -->
+                <Button
+                    android:id="@+id/btn_toggle_mic"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginBottom="6dp"
+                    android:background="@color/bg_button"
+                    android:text="@string/btn_mic"
+                    android:textColor="@color/text_primary"
+                    android:textSize="13sp" />
+
+                <!-- Manual Record Toggle -->
+                <Button
+                    android:id="@+id/btn_toggle_record"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginBottom="6dp"
+                    android:background="@color/accent_red"
+                    android:text="Stop Recording"
+                    android:textColor="#ffffff"
+                    android:textStyle="bold"
+                    android:textSize="13sp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <!-- Camera Recording Resolution Toggle (H.264 / H.265) -->
+                <Button
+                    android:id="@+id/btn_camera_res"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_marginBottom="4dp"
+                    android:background="@color/bg_button"
+                    android:text="Rec: 4K UHD"
+                    android:textColor="@color/accent_gold"
+                    android:textSize="12sp" />
+
+                <!-- Time Sync Button -->
+                <Button
+                    android:id="@+id/btn_sync_time"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:background="@color/bg_button"
+                    android:text="Sync Clock"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ================= SD CARD FOOTAGE / GALLERY MODE ================= -->
+        <LinearLayout
+            android:id="@+id/layout_gallery_mode"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <!-- Left: Clips List Column (Collapsible / Hidable) -->
+            <LinearLayout
+                android:id="@+id/layout_gallery_list_column"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.0"
+                android:orientation="vertical"
+                android:padding="10dp"
+                android:background="@color/bg_panel">
+
+                <!-- Title & Refresh Row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="6dp">
+
+                    <TextView
+                        android:id="@+id/tv_clip_count"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Footage on SD Card (Loading...)"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="13sp" />
+
+                    <Button
+                        android:id="@+id/btn_refresh_gallery"
+                        android:layout_width="wrap_content"
+                        android:layout_height="34dp"
+                        android:paddingLeft="10dp"
+                        android:paddingRight="10dp"
+                        android:text="@string/btn_refresh"
+                        android:background="@color/bg_button"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <!-- Filter Chips Row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginBottom="6dp">
+
+                    <Button
+                        android:id="@+id/btn_filter_all"
+                        android:layout_width="0dp"
+                        android:layout_height="32dp"
+                        android:layout_weight="1"
+                        android:layout_marginRight="4dp"
+                        android:background="@color/accent_blue"
+                        android:text="All"
+                        android:textColor="#ffffff"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/btn_filter_front"
+                        android:layout_width="0dp"
+                        android:layout_height="32dp"
+                        android:layout_weight="1"
+                        android:layout_marginRight="4dp"
+                        android:background="@color/bg_button"
+                        android:text="Front"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/btn_filter_rear"
+                        android:layout_width="0dp"
+                        android:layout_height="32dp"
+                        android:layout_weight="1"
+                        android:layout_marginRight="4dp"
+                        android:background="@color/bg_button"
+                        android:text="Rear"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/btn_filter_locked"
+                        android:layout_width="0dp"
+                        android:layout_height="32dp"
+                        android:layout_weight="1.2"
+                        android:background="@color/bg_button"
+                        android:text="Emergency"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <ListView
+                    android:id="@+id/lv_clips"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:divider="@color/divider"
+                    android:dividerHeight="1dp" />
+
+                <TextView
+                    android:id="@+id/tv_empty_gallery"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:gravity="center"
+                    android:text="@string/no_clips"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="16sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <!-- Right: Video Preview Column (Expands to 100% full screen when list is hidden!) -->
+            <LinearLayout
+                android:id="@+id/layout_gallery_preview_column"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.4"
+                android:orientation="vertical"
+                android:background="#000000">
+
+                <!-- Header Bar above video: Controls & Fullscreen Toggle -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
+                    android:background="@color/bg_panel">
+
+                    <!-- Hide / Show List Toggle Button -->
+                    <Button
+                        android:id="@+id/btn_toggle_gallery_list"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:paddingLeft="12dp"
+                        android:paddingRight="12dp"
+                        android:layout_marginRight="8dp"
+                        android:background="@color/accent_blue"
+                        android:text="Hide List"
+                        android:textColor="#ffffff"
+                        android:textSize="12sp" />
+
+                    <!-- Selected Clip Name -->
+                    <TextView
+                        android:id="@+id/tv_selected_clip_name"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Select a clip to review"
+                        android:textColor="@color/text_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:maxLines="1"
+                        android:ellipsize="middle" />
+
+                    <!-- Play / Pause Button -->
+                    <Button
+                        android:id="@+id/btn_play_clip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:layout_marginRight="6dp"
+                        android:background="@color/bg_button"
+                        android:text="Play Preview"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp" />
+
+                    <!-- Save to USB Button -->
+                    <Button
+                        android:id="@+id/btn_download_to_usb"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:background="@color/accent_green"
+                        android:text="@string/btn_download_usb"
+                        android:textColor="#ffffff"
+                        android:textStyle="bold"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <!-- Video Surface Area (Full Vertical Space!) -->
+                <FrameLayout
+                    android:id="@+id/frame_gallery_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:background="#000000">
+
+                    <!-- LibVLC Direct Hardware Accelerated Surface (Auto-scaled & Centered) -->
+                    <SurfaceView
+                        android:id="@+id/surface_gallery"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:layout_gravity="center"
+                        android:visibility="gone" />
+
+                    <ProgressBar
+                        android:id="@+id/pb_gallery_loading"
+                        android:layout_width="54dp"
+                        android:layout_height="54dp"
+                        android:layout_gravity="center"
+                        android:visibility="gone" />
+                </FrameLayout>
+
+                <!-- Footer Bar below video: Progress, Status & Details -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:background="@color/bg_panel">
+
+                    <ProgressBar
+                        android:id="@+id/pb_download_progress"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="10dp"
+                        android:max="100"
+                        android:progress="0"
+                        android:visibility="gone"
+                        android:layout_marginBottom="2dp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <TextView
+                            android:id="@+id/tv_clip_details"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Size: - | Date: -"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/tv_usb_status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="USB Drive: Checking..."
+                            android:textColor="@color/accent_gold"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/tv_download_stats"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textColor="@color/accent_green"
+                            android:textSize="12sp"
+                            android:layout_marginLeft="8dp"
+                            android:visibility="gone" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>

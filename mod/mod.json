@@ -1,0 +1,40 @@
+{
+  "id": "fitcamx-gen5w",
+  "name": "FITCAMX Dashcam",
+  "version": "0.5.3",
+  "hmgapi": ">=1.0.0",
+  "authors": ["Antigravity"],
+  "license": "AGPL-3.0",
+  "description": "View and control FITCAMX dashcam on the Gen5W head unit. Features live front/rear RTSP stream, camera controls, SD card footage review, and USB download to car flash drives. Self-contained LibVLC media engine.",
+  "live": true,
+  "apps": [
+    { "package": "fitcamx.app", "apk": "app/Fitcamx.apk" }
+  ],
+  "services": [
+    {
+      "name": "reboot",
+      "script": "svc/reboot.sh",
+      "user": "root",
+      "start": "manual",
+      "restart": false
+    }
+  ],
+  "usb": [
+    "DashcamFootage",
+    "fitcamx",
+    "logs"
+  ],
+  "provides": {
+    "launcher": [
+      {
+        "title": "FITCAMX",
+        "package": "fitcamx.app",
+        "class": ".MainActivity",
+        "icon": "icons/tile.png",
+        "icon_night": "icons/tile.png",
+        "icon_disabled": "icons/tile_disabled.png",
+        "icon_disabled_night": "icons/tile_disabled.png"
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+# Build outputs
+build/
+bin/
+gen/
+out/
+dist/
+
+# Intermediate files
+*.class
+*.dex
+*.obj
+*.o
+
+# Security & Private Keys
+*.keystore
+*.key
+*.jks
+*.p12
+
+# Logs and test diagnostics
+logs/
+*.log
+fitcamx_debug_log*.txt
+
+# IDE / Editor configuration
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
