@@ -4,6 +4,7 @@
 [![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)]()
 [![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)]()
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/badge/Release-v0.5.3-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
 A native, high-performance dashcam viewer and controller application specifically engineered for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" widescreen displays running Android 4.4.2 KitKat API 19).
 
@@ -11,18 +12,26 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 
 ---
 
-> [!CAUTION]
-> ### Important Legal Disclaimer & Assumption of Risk
-> **USE AT YOUR OWN RISK:** This application is provided "AS IS", without warranty of any kind, express or implied. Installing third-party software, modifying system settings, or jailbreaking automotive infotainment hardware carries inherent risks including system instability, potential loss of functionality, or voiding vehicle warranties. The authors and contributors assume no liability for any damage, warranty loss, vehicle malfunction, or legal consequences resulting from the use or installation of this software.
->
-> **NON-AFFILIATION NOTICE:**
-> * This project is an independent community open-source project and is **NOT affiliated with, authorized by, sponsored by, or endorsed by Hyundai Motor Group** (Hyundai Motor Company, Kia Corporation, Genesis Motor LLC) or any of their subsidiaries. All vehicle names, trademarks, and emblems belong to their respective owners.
-> * This project is **NOT affiliated with, authorized by, sponsored by, or endorsed by FITCAMX** or its manufacturer. The mark "FITCAMX" is used strictly for descriptive and nominative fair-use identification of hardware compatibility.
->
-> **DRIVER SAFETY NOTICE:**
-> Operating or viewing interactive video applications while driving is hazardous and strictly prohibited by traffic safety laws in most jurisdictions. This software is designed and intended solely for use when the vehicle is **safely parked**. Never operate or view video playback while operating the vehicle. Always keep your full attention on driving and the road.
->
-> *For the complete legal notice, please read [`DISCLAIMER.md`](DISCLAIMER.md).*
+## Installation
+
+### Prerequisites
+- Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
+
+### Method 1: HMG-API USB Installation (Recommended)
+1. Download the latest release package: [**`fitcamx-gen5w-v0.5.3-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.3/fitcamx-gen5w-v0.5.3-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.5.3-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.5.3)).
+2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
+   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.5.3.zip`.
+3. Insert the flash drive into the vehicle's multimedia USB port.
+4. Open the **HMG-API** app on the infotainment screen.
+5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
+6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
+
+### Method 2: NEMESIS Package Store
+1. Download [**`fitcamx-gen5w-v0.5.3-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.3/fitcamx-gen5w-v0.5.3-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.5.3-nemesis-package.zip`](dist/fitcamx-gen5w-v0.5.3-nemesis-package.zip)) and copy to your USB drive.
+2. Launch NEMESIS Manager on the head unit and install the package.
+
+> [!NOTE]
+> **No Codec Patch Required:** Unlike generic Android media players, this application bundles its own compiled LibVLC native engine and does **not** require KramerTech's `media.codecs` patch or system modifications.
 
 ---
 
@@ -70,11 +79,16 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 
 ## Supported Vehicles & Hardware
 
-### Head Unit Platforms
-- **Hyundai:** Ioniq 5 (2022+), Ioniq 6, Kona Electric (Gen5W), Tucson, Santa Fe, Sonata, Palisade
-- **Kia:** EV6 (2022+), EV9, Niro EV, Sportage, K5, Carnival, Telluride
-- **Genesis:** GV60, G80, GV70, GV80 (Gen5W models)
-- **OS Platform:** Android 4.4.2 KitKat (API 19), Dalvik runtime, ARMv7 (`armeabi-v7a`)
+### Head Unit Platforms & Compatibility
+
+> [!IMPORTANT]
+> **Tested & Verified Vehicle:** This software has been actively developed, benchmarked, and verified on a **2023 Hyundai Ioniq 5 AWD**.
+>
+> **Potentially Supported Vehicles (Untested):** Any Hyundai, Kia, or Genesis vehicle equipped with a **Gen5W** widescreen navigation system (10.25" or 12.3" display running Android 4.4.2 KitKat API 19). Because they share the identical underlying Telechips/Mobis hardware architecture and firmware stack, the following vehicles are theoretically compatible, but **have not yet been individually tested or verified**:
+> - **Hyundai:** Ioniq 5 (Tested & Verified), Ioniq 6, Kona Electric (Gen5W), Tucson, Santa Fe, Sonata, Palisade
+> - **Kia:** EV6, EV9, Niro EV, Sportage, K5, Carnival, Telluride
+> - **Genesis:** GV60, G80, GV70, GV80 (Gen5W models)
+> - **OS Platform:** Android 4.4.2 KitKat (API 19), Dalvik runtime, ARMv7 (`armeabi-v7a`)
 
 ### Dashcam Hardware
 - **FITCAMX OEM-Look Dashcams** (Novatek NT96672 / NT96675 / NT96670 architectures).
@@ -84,26 +98,18 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 
 ---
 
-## Installation
-
-### Prerequisites
-- Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
-
-### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release: `fitcamx-gen5w-v0.5.3-hmgapi-usb.zip`.
-2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
-   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.5.3.zip`.
-3. Insert the flash drive into the vehicle's multimedia USB port.
-4. Open the **HMG-API** app on the infotainment screen.
-5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
-6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
-
-### Method 2: NEMESIS Package Store
-1. Copy `fitcamx-gen5w-v0.5.3-nemesis-usb.zip` (or package file) to your USB drive.
-2. Launch NEMESIS Manager on the head unit and install the package.
-
-> [!NOTE]
-> **No Codec Patch Required:** Unlike generic Android media players, this application bundles its own compiled LibVLC native engine and does **not** require KramerTech's `media.codecs` patch.
+> [!CAUTION]
+> ### Important Legal Disclaimer & Assumption of Risk
+> **USE AT YOUR OWN RISK:** This application is provided "AS IS", without warranty of any kind, express or implied. Installing third-party software, modifying system settings, or jailbreaking automotive infotainment hardware carries inherent risks including system instability, potential loss of functionality, or voiding vehicle warranties. The authors and contributors assume no liability for any damage, warranty loss, vehicle malfunction, or legal consequences resulting from the use or installation of this software.
+>
+> **NON-AFFILIATION NOTICE:**
+> * This project is an independent community open-source project and is **NOT affiliated with, authorized by, sponsored by, or endorsed by Hyundai Motor Group** (Hyundai Motor Company, Kia Corporation, Genesis Motor LLC) or any of their subsidiaries. All vehicle names, trademarks, and emblems belong to their respective owners.
+> * This project is **NOT affiliated with, authorized by, sponsored by, or endorsed by FITCAMX** or its manufacturer. The mark "FITCAMX" is used strictly for descriptive and nominative fair-use identification of hardware compatibility.
+>
+> **DRIVER SAFETY NOTICE:**
+> Operating or viewing interactive video applications while driving is hazardous and strictly prohibited by traffic safety laws in most jurisdictions. This software is designed and intended solely for use when the vehicle is **safely parked**. Never operate or view video playback while operating the vehicle. Always keep your full attention on driving and the road.
+>
+> *For the complete legal notice, please read [`DISCLAIMER.md`](DISCLAIMER.md).*
 
 ---
 
@@ -123,7 +129,7 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/your-username/fitcamx-gen5w.git
+   git clone https://github.com/lemoyneiv/fitcamx-gen5w.git
    cd fitcamx-gen5w
    ```
 
@@ -171,7 +177,9 @@ fitcamx/
 │   │   └── reboot.sh               # Root service script for head unit reboot
 │   └── icons/                      # Head unit launcher icons
 ├── tools/
-│   └── build_package.py            # Automated build, dexing, alignment & signing pipeline
+│   ├── build_package.py            # Automated build, dexing, alignment & signing pipeline
+│   ├── setup_android_sdk.py        # Automated SDK setup helper
+│   └── sign.py                     # Standalone package signing utility
 ├── dist/                           # Final signed release packages
 ├── AGENT_GUIDE.md                  # Comprehensive technical handbook for AI assistants & developers
 ├── DISCLAIMER.md                   # Detailed legal disclaimers, trademark & driver safety notices
