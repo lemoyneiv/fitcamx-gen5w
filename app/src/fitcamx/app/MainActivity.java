@@ -1082,7 +1082,8 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void playGalleryPreview(ClipItem clip) {
+    private void playGalleryPreview(final ClipItem clip) {
+        if (clip == null) return;
         pbGalleryLoading.setVisibility(View.VISIBLE);
         if (surfaceGallery != null) {
             surfaceGallery.setVisibility(View.VISIBLE);
@@ -1092,7 +1093,7 @@ public class MainActivity extends Activity {
         // Check if clip is already downloaded on USB drive
         File usbFolder = UsbDownloader.getUsbDestinationFolder();
         File localFile = (usbFolder != null) ? new File(usbFolder, clip.filename) : null;
-        String playUri;
+        final String playUri;
 
         if (localFile != null && localFile.exists() && localFile.length() > 0) {
             playUri = localFile.getAbsolutePath();
@@ -1103,100 +1104,137 @@ public class MainActivity extends Activity {
             addDiagLog("Previewing clip via camera Wi-Fi (" + (clip.isFront ? "FRONT" : "REAR") + "): " + playUri);
         }
 
-        if (vlcPlayerManager != null && vlcPlayerManager.isInitialized()) {
-            final boolean isFront = (clip != null) ? clip.isFront : true;
-            final boolean is4kFront;
-            if (isFront) {
-                if (clip != null && clip.sizeBytes > 0) {
-                    // Novatek 4K 1-minute clips are typically ~200-300MB; 1080p clips are ~60-90MB
-                    is4kFront = (clip.sizeBytes > 120 * 1024 * 1024L);
-                } else {
-                    is4kFront = !is1080pMode;
-                }
-            } else {
-                is4kFront = false;
-            }
-
-            vlcPlayerManager.playGalleryClip(surfaceGallery, playUri, isFront, is4kFront, new VlcPlayerManager.GalleryListener() {
-                @Override
-                public void onPlaying() {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            pbGalleryLoading.setVisibility(View.GONE);
-                            btnPlayClip.setText("Pause");
-                            addDiagLog("VLC playing " + (is4kFront ? "front 4K slideshow (0.33x)" : (isFront ? "front 1080p (1.0x)" : "rear 1080p")) + " preview");
-                        }
-                    });
-                }
-
-                @Override
-                public void onBuffering(final float percent) {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (percent < 100.0f) {
-                                pbGalleryLoading.setVisibility(View.VISIBLE);
-                            } else {
-                                pbGalleryLoading.setVisibility(View.GONE);
-                            }
-                        }
-                    });
-                }
-
-                @Override
-                public void onTimeChanged(final long currentTimeMs, final long totalLengthMs) {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (selectedClip != null) {
-                                long curSec = currentTimeMs / 1000;
-                                if (totalLengthMs > 0) {
-                                    long totSec = totalLengthMs / 1000;
-                                    tvClipDetails.setText(String.format("Size: %s | %02d:%02d / %02d:%02d",
-                                            selectedClip.getFormattedSize(),
-                                            curSec / 60, curSec % 60,
-                                            totSec / 60, totSec % 60));
-                                } else {
-                                    tvClipDetails.setText(String.format("Size: %s | %02d:%02d",
-                                            selectedClip.getFormattedSize(),
-                                            curSec / 60, curSec % 60));
-                                }
-                            }
-                        }
-                    });
-                }
-
-                @Override
-                public void onEndReached() {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            btnPlayClip.setText("Replay");
-                            addDiagLog("Clip preview finished");
-                        }
-                    });
-                }
-
-                @Override
-                public void onError(final String message) {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            pbGalleryLoading.setVisibility(View.GONE);
-                            btnPlayClip.setText("Play Preview");
-                            String err = "VLC playback error: " + message;
-                            addDiagLog(err);
-                            DebugLogger.log("GALLERY_ERR", err);
-                            Toast.makeText(MainActivity.this, err, Toast.LENGTH_SHORT).show();
-                        }
-                    });
-                }
-            });
-        } else {
+        if (vlcPlayerManager == null || !vlcPlayerManager.isInitialized()) {
             pbGalleryLoading.setVisibility(View.GONE);
             Toast.makeText(MainActivity.this, "VLC Player engine not available", Toast.LENGTH_SHORT).show();
+            return;
         }
+
+        final boolean isFront = clip.isFront;
+
+        // Rear clips are ALWAYS 1080p AVC
+        if (!isFront) {
+            startGalleryPlaybackInternal(clip, playUri, false, false);
+            return;
+        }
+
+        // For Front clips: check cached codec first
+        if (clip.isHevc != null) {
+            boolean is4kFront = clip.isHevc;
+            startGalleryPlaybackInternal(clip, playUri, true, is4kFront);
+            return;
+        }
+
+        // Sniff TS header in background thread (<20ms) to detect whether this specific file is HEVC or AVC
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                int codec = TsHeaderSniffer.sniffCodec(playUri);
+                final boolean is4kFront;
+                if (codec == TsHeaderSniffer.CODEC_HEVC) {
+                    clip.isHevc = true;
+                    is4kFront = true;
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 4K/2K HEVC (stream 0x24)");
+                } else if (codec == TsHeaderSniffer.CODEC_AVC) {
+                    clip.isHevc = false;
+                    is4kFront = false;
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 1080p AVC (stream 0x1B)");
+                } else {
+                    // Fallback to active camera mode if sniffer cannot read header
+                    is4kFront = !is1080pMode;
+                    clip.isHevc = is4kFront;
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffer uncertain; falling back to camera mode: " + (is4kFront ? "4K HEVC" : "1080p AVC"));
+                }
+
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (selectedClip == clip) {
+                            startGalleryPlaybackInternal(clip, playUri, true, is4kFront);
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void startGalleryPlaybackInternal(final ClipItem clip, final String playUri, final boolean isFront, final boolean is4kFront) {
+        vlcPlayerManager.playGalleryClip(surfaceGallery, playUri, isFront, is4kFront, new VlcPlayerManager.GalleryListener() {
+            @Override
+            public void onPlaying() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        pbGalleryLoading.setVisibility(View.GONE);
+                        btnPlayClip.setText("Pause");
+                        addDiagLog("VLC playing " + (is4kFront ? "front 4K slideshow (0.33x)" : (isFront ? "front 1080p (1.0x)" : "rear 1080p")) + " preview");
+                    }
+                });
+            }
+
+            @Override
+            public void onBuffering(final float percent) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (percent < 100.0f) {
+                            pbGalleryLoading.setVisibility(View.VISIBLE);
+                        } else {
+                            pbGalleryLoading.setVisibility(View.GONE);
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onTimeChanged(final long currentTimeMs, final long totalLengthMs) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (selectedClip != null) {
+                            long curSec = currentTimeMs / 1000;
+                            if (totalLengthMs > 0) {
+                                long totSec = totalLengthMs / 1000;
+                                tvClipDetails.setText(String.format("Size: %s | %02d:%02d / %02d:%02d",
+                                        selectedClip.getFormattedSize(),
+                                        curSec / 60, curSec % 60,
+                                        totSec / 60, totSec % 60));
+                            } else {
+                                tvClipDetails.setText(String.format("Size: %s | %02d:%02d",
+                                        selectedClip.getFormattedSize(),
+                                        curSec / 60, curSec % 60));
+                            }
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onEndReached() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        btnPlayClip.setText("Replay");
+                        addDiagLog("Clip preview finished");
+                    }
+                });
+            }
+
+            @Override
+            public void onError(final String message) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        pbGalleryLoading.setVisibility(View.GONE);
+                        btnPlayClip.setText("Play Preview");
+                        String err = "VLC playback error: " + message;
+                        addDiagLog(err);
+                        DebugLogger.log("GALLERY_ERR", err);
+                        Toast.makeText(MainActivity.this, err, Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
     }
 
     private void checkUsbStatus() {

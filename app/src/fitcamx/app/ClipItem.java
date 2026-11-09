@@ -9,6 +9,7 @@ public class ClipItem implements Serializable {
     public final String timeStr;
     public final boolean isFront;
     public final boolean isLocked;
+    public Boolean isHevc = null; // null = unprobed, true = HEVC (4K/2K), false = AVC (1080p)
 
     public ClipItem(String rawPath, long sizeBytes, String timeStr, int attr) {
         if (rawPath == null) rawPath = "";
