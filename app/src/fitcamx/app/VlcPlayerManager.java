@@ -392,7 +392,7 @@ public class VlcPlayerManager {
                 switch (event.type) {
                     case MediaPlayer.Event.Playing:
                         DebugLogger.log("VLC_GAL", tag + " clip playing (Length: " + player.getLength() + "ms)");
-                        if ("FRONT".equals(tag)) {
+                        if (player == frontGalleryPlayer) {
                             player.setRate(0.33f);
                             DebugLogger.log("VLC_GAL", "Enforced front keyframe rate: 0.33x for slideshow review");
                         } else {
@@ -431,10 +431,14 @@ public class VlcPlayerManager {
                 isFront = false;
             }
         }
-        playGalleryClip(surfaceView, playUri, isFront, listener);
+        playGalleryClip(surfaceView, playUri, isFront, isFront, listener);
     }
 
     public void playGalleryClip(SurfaceView surfaceView, String playUri, boolean isFront, GalleryListener listener) {
+        playGalleryClip(surfaceView, playUri, isFront, isFront, listener);
+    }
+
+    public void playGalleryClip(SurfaceView surfaceView, String playUri, boolean isFront, boolean is4kFront, GalleryListener listener) {
         if (!isInitialized()) {
             if (listener != null) listener.onError("LibVLC not initialized");
             return;
@@ -446,17 +450,19 @@ public class VlcPlayerManager {
         try {
             stopGalleryClip();
 
-            // Select specialized player engine
+            // Select specialized player engine:
+            // Only use the dedicated 4K keyframe engine if it is a Front clip AND recorded in high resolution (4K / 2K)
+            final boolean useFront4kEngine = isFront && is4kFront;
             final MediaPlayer targetPlayer;
             final LibVLC targetLibVlc;
-            if (isFront && frontGalleryPlayer != null && libVlcFront != null) {
+            if (useFront4kEngine && frontGalleryPlayer != null && libVlcFront != null) {
                 targetPlayer = frontGalleryPlayer;
                 targetLibVlc = libVlcFront;
                 DebugLogger.log("VLC_GAL", "Using dedicated Front 4K Keyframe Engine for: " + playUri);
             } else {
                 targetPlayer = galleryPlayer;
                 targetLibVlc = libVLC;
-                DebugLogger.log("VLC_GAL", "Using standard AVC Engine for: " + playUri);
+                DebugLogger.log("VLC_GAL", "Using standard AVC Engine (" + (isFront ? "Front 1080p" : "Rear 1080p") + ") for: " + playUri);
             }
             this.activeGalleryPlayer = targetPlayer;
 
@@ -479,8 +485,8 @@ public class VlcPlayerManager {
             media.addOption(":clock-jitter=0");
             media.addOption(":clock-synchro=0");
 
-            if (isFront) {
-                // High-Resolution Front Camera Profile (4K / 1440p HEVC):
+            if (useFront4kEngine) {
+                // High-Resolution Front Camera Profile (4K / 1440p HEVC) - KEPT FULLY INTACT
                 if (playUri.startsWith("http://") || playUri.startsWith("https://")) {
                     media.addOption(":network-caching=3000"); // 3s network cache for camera Wi-Fi streaming
                 } else {
@@ -497,7 +503,8 @@ public class VlcPlayerManager {
                 media.addOption(":avcodec-fast=1");
                 DebugLogger.log("VLC_GAL", "Front high-res profile applied: keyframe-only (skip-frame=3, skiploopfilter=4, no-ts-trust-pcr)");
             } else {
-                // Rear Camera Profile (1080p H.264):
+                // 1080p Profile (Standard H.264 AVC for Front 1080p & Rear 1080p):
+                // Full 1.0x framerate, NO skip-idct (no gray areas!), NO skip-frame
                 if (playUri.startsWith("http://") || playUri.startsWith("https://")) {
                     media.addOption(":network-caching=2500");
                 } else {
@@ -505,15 +512,15 @@ public class VlcPlayerManager {
                 }
                 media.addOption(":avcodec-threads=4");
                 media.addOption(":avcodec-fast=1");
-                DebugLogger.log("VLC_GAL", "Rear 1080p profile applied: full framerate AVC");
+                DebugLogger.log("VLC_GAL", (isFront ? "Front" : "Rear") + " 1080p profile applied: full framerate AVC");
             }
 
             targetPlayer.setMedia(media);
             media.release();
 
-            DebugLogger.log("VLC_GAL", "Starting gallery preview (" + (isFront ? "FRONT" : "REAR") + "): " + playUri);
+            DebugLogger.log("VLC_GAL", "Starting gallery preview (" + (useFront4kEngine ? "FRONT 4K" : (isFront ? "FRONT 1080P" : "REAR 1080P")) + "): " + playUri);
             targetPlayer.play();
-            if (isFront) {
+            if (useFront4kEngine) {
                 targetPlayer.setRate(0.33f);
                 DebugLogger.log("VLC_GAL", "Requested front player rate: 0.33x for keyframe slideshow review");
             } else {

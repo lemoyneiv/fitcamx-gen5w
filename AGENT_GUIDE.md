@@ -254,10 +254,10 @@ The script performs the following tasks:
 4. Executes `zipalign -f 4`.
 5. Signs `Fitcamx.apk` with `apksigner` using a dedicated 2048-bit RSA keystore (v1 JAR signature only).
 6. Stages the mod directory, invokes `sign.py` with ECDSA SHA256 author keys, and outputs:
-   - `dist/fitcamx-gen5w-v0.5.3.hmgapi.zip`
-   - `dist/fitcamx-gen5w-v0.5.3-hmgapi-usb.zip`
-   - `dist/fitcamx-gen5w-v0.5.3-nemesis-usb.zip`
-   - `dist/fitcamx-gen5w-v0.5.3-nemesis-package.zip`
+   - `dist/fitcamx-gen5w-v0.5.4.hmgapi.zip`
+   - `dist/fitcamx-gen5w-v0.5.4-hmgapi-usb.zip`
+   - `dist/fitcamx-gen5w-v0.5.4-nemesis-usb.zip`
+   - `dist/fitcamx-gen5w-v0.5.4-nemesis-package.zip`
 
 ---
 

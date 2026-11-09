@@ -103,6 +103,7 @@ public class MainActivity extends Activity {
     private boolean isRecording = true;
     private boolean isMicOn = true;
     private boolean isConnected = false;
+    private boolean hasRearCamera = true;
     private String currentSsid = "";
     private String currentDiagDetails = "";
     private final List<ClipItem> allClips = new ArrayList<ClipItem>();
@@ -119,7 +120,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         try {
             DebugLogger.init(this);
-            DebugLogger.log("MAIN", "MainActivity created (Gen5W FITCAMX v0.5.3)");
+            DebugLogger.log("MAIN", "MainActivity created (Gen5W FITCAMX v0.5.4)");
             setContentView(R.layout.activity_main);
             initViews();
             setupListeners();
@@ -270,7 +271,7 @@ public class MainActivity extends Activity {
                 String vName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
                 tvAppVersion.setText("v" + vName);
             } catch (Exception e) {
-                tvAppVersion.setText("v0.5.3");
+                tvAppVersion.setText("v0.5.4");
             }
         }
 
@@ -709,6 +710,10 @@ public class MainActivity extends Activity {
     }
 
     private void cycleViewMode() {
+        if (!hasRearCamera) {
+            Toast.makeText(this, "Single camera configuration (Front only)", Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (targetViewMode == CameraClient.VIEW_FRONT) {
             targetViewMode = CameraClient.VIEW_DUAL;
         } else if (targetViewMode == CameraClient.VIEW_DUAL) {
@@ -721,6 +726,10 @@ public class MainActivity extends Activity {
     }
 
     private void showViewModeSelectionDialog() {
+        if (!hasRearCamera) {
+            Toast.makeText(this, "Single camera configuration (Front only)", Toast.LENGTH_SHORT).show();
+            return;
+        }
         final String[] options = new String[] {
             "Front Camera" + (activeStreamMode == CameraClient.VIEW_FRONT ? "  \u2713" : ""),
             "Dual View (Both)" + (activeStreamMode == CameraClient.VIEW_DUAL ? "  \u2713" : ""),
@@ -748,6 +757,12 @@ public class MainActivity extends Activity {
 
     private void updateViewModeUI() {
         if (btnToggleCam == null) return;
+        if (!hasRearCamera) {
+            btnToggleCam.setText("View: Front (Single Cam)");
+            btnToggleCam.setEnabled(false);
+            return;
+        }
+        btnToggleCam.setEnabled(true);
         if (isStartingLive && targetViewMode != activeStreamMode) {
             btnToggleCam.setText("View: " + getViewModeLabel(targetViewMode) + " \u2026");
         } else {
@@ -755,6 +770,55 @@ public class MainActivity extends Activity {
                 btnToggleCam.setText("View: DUAL (PIP)");
             } else {
                 btnToggleCam.setText("View: " + getViewModeLabel(activeStreamMode));
+            }
+        }
+    }
+
+    private void checkCameraConfiguration() {
+        if (allClips != null && !allClips.isEmpty()) {
+            boolean foundRear = false;
+            for (ClipItem clip : allClips) {
+                if (!clip.isFront) {
+                    foundRear = true;
+                    break;
+                }
+            }
+            if (hasRearCamera != foundRear) {
+                hasRearCamera = foundRear;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        applyCameraConfigurationUI();
+                    }
+                });
+            }
+        }
+    }
+
+    private void applyCameraConfigurationUI() {
+        if (!hasRearCamera) {
+            targetViewMode = CameraClient.VIEW_FRONT;
+            currentViewMode = CameraClient.VIEW_FRONT;
+            activeStreamMode = CameraClient.VIEW_FRONT;
+
+            if (btnToggleCam != null) {
+                btnToggleCam.setText("View: Front (Single Cam)");
+                btnToggleCam.setEnabled(false);
+            }
+            if (btnFilterRear != null) {
+                btnFilterRear.setVisibility(View.GONE);
+            }
+            if (btnFilterAll != null) {
+                btnFilterAll.setText("All Clips");
+            }
+            DebugLogger.log("MAIN", "Single camera configuration active (Front only, rear/dual views disabled)");
+        } else {
+            if (btnToggleCam != null) {
+                btnToggleCam.setEnabled(true);
+                updateViewModeUI();
+            }
+            if (btnFilterRear != null) {
+                btnFilterRear.setVisibility(View.VISIBLE);
             }
         }
     }
@@ -992,6 +1056,7 @@ public class MainActivity extends Activity {
                 if (clips != null) {
                     allClips.addAll(clips);
                 }
+                checkCameraConfiguration();
                 applyFilter();
 
                 String resMsg = "SD card loaded: " + allClips.size() + " clips";
@@ -1040,7 +1105,19 @@ public class MainActivity extends Activity {
 
         if (vlcPlayerManager != null && vlcPlayerManager.isInitialized()) {
             final boolean isFront = (clip != null) ? clip.isFront : true;
-            vlcPlayerManager.playGalleryClip(surfaceGallery, playUri, isFront, new VlcPlayerManager.GalleryListener() {
+            final boolean is4kFront;
+            if (isFront) {
+                if (clip != null && clip.sizeBytes > 0) {
+                    // Novatek 4K 1-minute clips are typically ~200-300MB; 1080p clips are ~60-90MB
+                    is4kFront = (clip.sizeBytes > 120 * 1024 * 1024L);
+                } else {
+                    is4kFront = !is1080pMode;
+                }
+            } else {
+                is4kFront = false;
+            }
+
+            vlcPlayerManager.playGalleryClip(surfaceGallery, playUri, isFront, is4kFront, new VlcPlayerManager.GalleryListener() {
                 @Override
                 public void onPlaying() {
                     runOnUiThread(new Runnable() {
@@ -1048,7 +1125,7 @@ public class MainActivity extends Activity {
                         public void run() {
                             pbGalleryLoading.setVisibility(View.GONE);
                             btnPlayClip.setText("Pause");
-                            addDiagLog("VLC playing " + (isFront ? "front 4K slideshow (0.33x)" : "rear 1080p") + " preview");
+                            addDiagLog("VLC playing " + (is4kFront ? "front 4K slideshow (0.33x)" : (isFront ? "front 1080p (1.0x)" : "rear 1080p")) + " preview");
                         }
                     });
                 }

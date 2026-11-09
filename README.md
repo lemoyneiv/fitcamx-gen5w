@@ -4,7 +4,7 @@
 [![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)]()
 [![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)]()
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v0.5.3-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v0.5.4-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
 A native, high-performance dashcam viewer and controller application specifically engineered for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" widescreen displays running Android 4.4.2 KitKat API 19).
 
@@ -18,16 +18,16 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 - Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
 
 ### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release package: [**`fitcamx-gen5w-v0.5.3-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.3/fitcamx-gen5w-v0.5.3-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.5.3-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.5.3)).
+1. Download the latest release package: [**`fitcamx-gen5w-v0.5.4-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.4/fitcamx-gen5w-v0.5.4-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.5.4-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.5.4)).
 2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
-   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.5.3.zip`.
+   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.5.4.zip`.
 3. Insert the flash drive into the vehicle's multimedia USB port.
 4. Open the **HMG-API** app on the infotainment screen.
 5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
 6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
 
 ### Method 2: NEMESIS Package Store
-1. Download [**`fitcamx-gen5w-v0.5.3-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.3/fitcamx-gen5w-v0.5.3-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.5.3-nemesis-package.zip`](dist/fitcamx-gen5w-v0.5.3-nemesis-package.zip)) and copy to your USB drive.
+1. Download [**`fitcamx-gen5w-v0.5.4-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.4/fitcamx-gen5w-v0.5.4-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.5.4-nemesis-package.zip`](dist/fitcamx-gen5w-v0.5.4-nemesis-package.zip)) and copy to your USB drive.
 2. Launch NEMESIS Manager on the head unit and install the package.
 
 > [!NOTE]

@@ -28,7 +28,8 @@ public class WifiBridge {
     private static final String TAG = "FitcamxWifi";
 
     public static final String DEFAULT_PASSWORD = "12345678";
-    private static final Pattern SSID_PATTERN = Pattern.compile("(?i)^(CAR_CAM_|FITCAMX_|CARDV_|CarDV_).*");
+    // Match any SSID containing standard dashcam tokens (e.g. CAR_CAM_*, FITCAMX_*, JsKiaEV6FITCAMX, CARDV_*, etc.)
+    private static final Pattern SSID_PATTERN = Pattern.compile("(?i).*(CAR_CAM|FITCAMX|CARDV|DASHCAM|NOVATEK).*");
 
     // Android AP state constants (hidden in API 19)
     public static final String WIFI_AP_STATE_CHANGED_ACTION = "android.net.wifi.WIFI_AP_STATE_CHANGED";
@@ -192,12 +193,12 @@ public class WifiBridge {
     }
 
     private void checkCurrentOrStartScan() {
-        // First check if already connected to a matching SSID
+        // First check if already connected to a matching SSID or dashcam gateway
         WifiInfo currentInfo = wifiManager.getConnectionInfo();
         if (currentInfo != null && currentInfo.getSSID() != null) {
             String ssid = cleanSsid(currentInfo.getSSID());
-            if (isMatchingSsid(ssid)) {
-                DhcpInfo dhcp = wifiManager.getDhcpInfo();
+            DhcpInfo dhcp = wifiManager.getDhcpInfo();
+            if (isLikelyDashcamConnection(ssid, dhcp)) {
                 if (dhcp != null && dhcp.ipAddress != 0) {
                     notifyStatus("Already connected to " + ssid + ". Verifying camera...");
                     startDhcpAndCameraProbe(ssid);
@@ -240,8 +241,8 @@ public class WifiBridge {
         WifiInfo currentInfo = wifiManager.getConnectionInfo();
         if (currentInfo != null && currentInfo.getSSID() != null) {
             String ssid = cleanSsid(currentInfo.getSSID());
-            if (isMatchingSsid(ssid)) {
-                DhcpInfo dhcp = wifiManager.getDhcpInfo();
+            DhcpInfo dhcp = wifiManager.getDhcpInfo();
+            if (isLikelyDashcamConnection(ssid, dhcp)) {
                 if (dhcp != null && dhcp.ipAddress != 0) {
                     notifyStatus("Re-checking camera connection on " + ssid + "...");
                     startDhcpAndCameraProbe(ssid);
@@ -298,7 +299,8 @@ public class WifiBridge {
                     WifiInfo wifiInfo = wifiManager.getConnectionInfo();
                     if (wifiInfo != null && wifiInfo.getSSID() != null) {
                         String ssid = cleanSsid(wifiInfo.getSSID());
-                        if (isMatchingSsid(ssid)) {
+                        DhcpInfo dhcp = wifiManager.getDhcpInfo();
+                        if (isLikelyDashcamConnection(ssid, dhcp)) {
                             startDhcpAndCameraProbe(ssid);
                         }
                     }
@@ -349,7 +351,7 @@ public class WifiBridge {
             notifyStatus("Found " + targetMatch.SSID + " (" + targetMatch.level + " dBm). Connecting...");
             connectToSsid(targetMatch.SSID, DEFAULT_PASSWORD);
         } else {
-            notifyStatus("Found " + lastScanResults.size() + " networks [" + sb.toString() + "]. Retrying for CAR_CAM_*...");
+            notifyStatus("Found " + lastScanResults.size() + " networks [" + sb.toString() + "]. Searching for dashcam...");
         }
     }
 
@@ -818,6 +820,24 @@ public class WifiBridge {
         if (ssid == null) return false;
         String clean = cleanSsid(ssid);
         return SSID_PATTERN.matcher(clean).matches();
+    }
+
+    /**
+     * Determines if a current Wi-Fi connection is likely the dashcam.
+     * Matches if SSID contains dashcam identifiers OR if gateway/server IP is a known dashcam default
+     * (192.168.1.254 Novatek standard, 192.168.0.1, 192.168.1.1, 192.72.1.1).
+     */
+    public static boolean isLikelyDashcamConnection(String ssid, DhcpInfo dhcp) {
+        if (isMatchingSsid(ssid)) return true;
+        if (dhcp != null && dhcp.ipAddress != 0) {
+            String gw = intToIp(dhcp.gateway);
+            String srv = intToIp(dhcp.serverAddress);
+            if (CameraClient.DEFAULT_CAMERA_IP.equals(gw) || CameraClient.DEFAULT_CAMERA_IP.equals(srv) ||
+                "192.168.0.1".equals(gw) || "192.168.1.1".equals(gw) || "192.72.1.1".equals(gw)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void notifyStatus(final String msg) {

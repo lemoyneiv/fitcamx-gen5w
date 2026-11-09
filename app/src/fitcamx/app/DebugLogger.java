@@ -51,7 +51,7 @@ public class DebugLogger {
                 }
             } catch (Exception ignored) {}
         }
-        log("LOGGER", "DebugLogger initialized (App: fitcamx-gen5w v0.5.3)");
+        log("LOGGER", "DebugLogger initialized (App: fitcamx-gen5w v0.5.4)");
     }
 
     public static synchronized void log(String tag, String message) {
@@ -213,7 +213,7 @@ public class DebugLogger {
         sb.append("                       FITCAMX GEN5W DEBUG REPORT                               \n");
         sb.append("================================================================================\n");
         sb.append("Timestamp:       ").append(DATE_FMT.format(new Date())).append("\n");
-        sb.append("App Version:     0.5.3 (Dalvik DEX KitKat API 19)\n");
+        sb.append("App Version:     0.5.4 (Dalvik DEX KitKat API 19)\n");
         sb.append("Device Model:    ").append(Build.MODEL).append(" (").append(Build.PRODUCT).append(")\n");
         sb.append("Manufacturer:    ").append(Build.MANUFACTURER).append("\n");
         sb.append("Hardware / Board:").append(Build.HARDWARE).append(" / ").append(Build.BOARD).append("\n");
