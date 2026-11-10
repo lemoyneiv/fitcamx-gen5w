@@ -1,29 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="fitcamx.app"
-    android:versionCode="18"
-    android:versionName="0.5.4">
+    android:versionCode="19"
+    android:versionName="0.6.0">
 
     <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
 
     <!-- Gen5W requires GET_TASKS to prevent crashes in Activity.finish() -->
     <uses-permission android:name="android.permission.GET_TASKS" />
-    <uses-permission android:name="android.permission.REBOOT" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="FITCAMX"
         android:icon="@drawable/ic_app"
-        android:theme="@android:style/Theme.Holo.NoActionBar"
+        android:theme="@style/FitcamxTheme"
         android:allowBackup="false">
 
         <!-- Prevent aspect ratio squeeze on 24:9 / 8:3 wide screen -->

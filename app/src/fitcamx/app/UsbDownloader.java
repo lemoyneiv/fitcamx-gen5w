@@ -28,6 +28,7 @@ public class UsbDownloader {
     private final Handler mainHandler;
     private final ExecutorService executor;
     private volatile boolean isCancelled = false;
+    private volatile boolean isDownloading = false;
 
     public interface DownloadCallback {
         void onProgress(int percent, double speedMbPerSec, long downloadedBytes, long totalBytes);
@@ -85,17 +86,33 @@ public class UsbDownloader {
         isCancelled = true;
     }
 
+    public boolean isDownloading() {
+        return isDownloading;
+    }
+
+    public void shutdown() {
+        isCancelled = true;
+        executor.shutdownNow();
+    }
+
     public void downloadClip(final ClipItem clip, final String cameraIp, final DownloadCallback callback) {
         downloadClip(clip, cameraIp, false, 80, callback);
     }
 
     public void downloadClip(final ClipItem clip, final String cameraIp, final boolean isJieLi, final int port, final DownloadCallback callback) {
+        downloadClipToFolder(clip, cameraIp, isJieLi, port, null, callback);
+    }
+
+    public void downloadClipToFolder(final ClipItem clip, final String cameraIp, final boolean isJieLi, final int port, final File explicitDestFolder, final DownloadCallback callback) {
+        if (executor.isShutdown()) return;
         isCancelled = false;
         executor.execute(new Runnable() {
             @Override
             public void run() {
-                File destFolder = getUsbDestinationFolder();
+                isDownloading = true;
+                File destFolder = (explicitDestFolder != null) ? explicitDestFolder : getUsbDestinationFolder();
                 if (destFolder == null) {
+                    isDownloading = false;
                     Exception e = new Exception("No writable USB drive found across checked mount points");
                     DebugLogger.log("USB_DL", "Download aborted: " + e.getMessage());
                     postError(callback, e);
@@ -103,18 +120,24 @@ public class UsbDownloader {
                 }
 
                 File outFile = new File(destFolder, clip.filename);
+                File partFile = new File(destFolder, clip.filename + ".part");
                 String httpUrl = clip.getHttpUrl(cameraIp, isJieLi, port);
-                DebugLogger.log("USB_DL", "Starting download: " + httpUrl + " -> " + outFile.getAbsolutePath());
+                DebugLogger.log("USB_DL", "Starting atomic download: " + httpUrl + " -> " + outFile.getAbsolutePath());
                 HttpURLConnection conn = null;
                 InputStream in = null;
                 FileOutputStream out = null;
 
                 try {
+                    if (partFile.exists()) {
+                        partFile.delete();
+                    }
+
                     URL url = new URL(httpUrl);
                     conn = (HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("GET");
+                    conn.setRequestProperty("Connection", "close");
                     conn.setConnectTimeout(5000);
-                    conn.setReadTimeout(10000);
+                    conn.setReadTimeout(12000);
 
                     int code = conn.getResponseCode();
                     DebugLogger.log("USB_DL", "HTTP " + code + " for " + httpUrl);
@@ -128,9 +151,9 @@ public class UsbDownloader {
                     }
 
                     in = conn.getInputStream();
-                    out = new FileOutputStream(outFile);
+                    out = new FileOutputStream(partFile);
 
-                    byte[] buffer = new byte[32 * 1024];
+                    byte[] buffer = new byte[64 * 1024];
                     long downloaded = 0;
                     long startTime = System.currentTimeMillis();
                     long lastUpdateTime = startTime;
@@ -138,10 +161,7 @@ public class UsbDownloader {
                     int read;
                     while ((read = in.read(buffer)) != -1) {
                         if (isCancelled) {
-                            out.close();
-                            outFile.delete();
-                            postError(callback, new Exception("Download cancelled by user"));
-                            return;
+                            throw new Exception("Download cancelled by user");
                         }
 
                         out.write(buffer, 0, read);
@@ -151,17 +171,37 @@ public class UsbDownloader {
                         if (now - lastUpdateTime >= 250 || (totalBytes > 0 && downloaded == totalBytes)) {
                             double elapsedSec = Math.max(0.001, (now - startTime) / 1000.0);
                             double speedMb = (downloaded / (1024.0 * 1024.0)) / elapsedSec;
-                            int percent = (totalBytes > 0) ? (int) ((downloaded * 100) / totalBytes) : -1;
+                            int percent = (totalBytes > 0) ? (int) Math.min(100L, (downloaded * 100L) / totalBytes) : -1;
 
                             postProgress(callback, percent, speedMb, downloaded, totalBytes);
                             lastUpdateTime = now;
                         }
                     }
 
+                    if (downloaded <= 0) {
+                        throw new Exception("Received empty response from camera");
+                    }
+                    if (totalBytes > 0 && downloaded < totalBytes) {
+                        throw new Exception("Incomplete download (" + downloaded + " / " + totalBytes + " bytes)");
+                    }
+
                     out.flush();
+                    try {
+                        out.getFD().sync();
+                    } catch (Exception ignored) {}
                     out.close();
+                    out = null;
                     in.close();
+                    in = null;
                     conn.disconnect();
+                    conn = null;
+
+                    if (outFile.exists() && !outFile.delete()) {
+                        DebugLogger.log("USB_DL", "Warning: could not remove pre-existing file before rename: " + outFile.getAbsolutePath());
+                    }
+                    if (!partFile.renameTo(outFile)) {
+                        throw new Exception("Failed committing temporary file to USB destination");
+                    }
 
                     DebugLogger.log("USB_DL", "Download SUCCESS: " + outFile.getAbsolutePath() + " (" + outFile.length() + " bytes)");
                     postComplete(callback, outFile);
@@ -170,15 +210,21 @@ public class UsbDownloader {
                     DebugLogger.log("USB_DL", "Download FAILED: " + clip.filename + " -> " + e.getMessage(), e);
                     try {
                         if (out != null) out.close();
+                    } catch (Exception ignored) {}
+                    try {
                         if (in != null) in.close();
+                    } catch (Exception ignored) {}
+                    try {
                         if (conn != null) conn.disconnect();
                     } catch (Exception ignored) {}
 
-                    if (outFile.exists() && outFile.length() == 0) {
-                        outFile.delete();
+                    if (partFile.exists()) {
+                        partFile.delete();
                     }
 
                     postError(callback, e);
+                } finally {
+                    isDownloading = false;
                 }
             }
         });

@@ -2,6 +2,8 @@ package fitcamx.app;
 
 import android.content.Context;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.SurfaceView;
@@ -15,6 +17,7 @@ import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.interfaces.IVLCVout;
 
 import java.util.ArrayList;
+import java.util.List;
 
 /**
  * High-performance VideoLAN (LibVLC) streaming and playback engine for Gen5W.
@@ -60,20 +63,67 @@ public class VlcPlayerManager {
     }
 
     public interface GalleryListener {
-        void onPlaying();
+        void onPlaying(boolean seekable, long totalLengthMs);
         void onBuffering(float percent);
-        void onTimeChanged(long currentTimeMs, long totalLengthMs);
+        void onProgressChanged(float position, long currentTimeMs, long totalLengthMs, boolean seekable);
         void onEndReached();
         void onError(String message);
     }
 
+    /**
+     * Returns the default initial playback rate for a gallery clip:
+     * - 4K / 2K HEVC streams ALWAYS default to 0.33x rate dilation.
+     * - 1080p AVC streams ALWAYS default to 1.0x full speed.
+     */
+    public static float getDefaultGalleryRate(boolean isHevc) {
+        return isHevc ? 0.33f : 1.0f;
+    }
+
+    /**
+     * Cycles playback speed within hardware-safe limits for the active clip's codec:
+     * - 4K / 2K HEVC: toggles strictly between 0.33x <-> 0.5x (1.0x is disallowed as 4K software decode drops frames at 1.0x).
+     * - 1080p AVC: cycles 1.0x -> 0.5x -> 0.33x -> 1.0x so users can slow down 1080p clips if desired.
+     */
+    public static float getNextGalleryRate(float currentRate, boolean isHevc) {
+        if (isHevc) {
+            return (currentRate < 0.4f) ? 0.5f : 0.33f;
+        }
+        if (currentRate > 0.8f) {
+            return 0.5f;
+        } else if (currentRate > 0.4f) {
+            return 0.33f;
+        } else {
+            return 1.0f;
+        }
+    }
+
+    /**
+     * Ensures any requested rate stays within valid bounds for the clip's codec.
+     */
+    public static float sanitizeGalleryRate(float requestedRate, boolean isHevc) {
+        if (isHevc) {
+            if (requestedRate >= 0.45f && requestedRate <= 0.55f) {
+                return 0.5f;
+            }
+            return 0.33f;
+        }
+        if (requestedRate > 0.05f && requestedRate <= 1.05f) {
+            return requestedRate;
+        }
+        return 1.0f;
+    }
+
     private final Context context;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final List<Runnable> pendingReadyActions = new ArrayList<Runnable>();
+
+    private volatile boolean initialized = false;
+    private volatile boolean initFailed = false;
+    private volatile boolean released = false;
+
     private LibVLC libVLC;
-    private LibVLC libVlcFront;
     private MediaPlayer livePlayer;
     private MediaPlayer galleryPlayer;
-    private MediaPlayer frontGalleryPlayer;
-    private MediaPlayer activeGalleryPlayer;
 
     private LiveListener liveListener;
     private GalleryListener galleryListener;
@@ -83,88 +133,97 @@ public class VlcPlayerManager {
 
     private double liveAspect = 16.0 / 9.0;
     private double galleryAspect = 16.0 / 9.0;
+    private volatile float targetGalleryRate = 1.0f;
+    private volatile boolean galleryPaused = false;
+    private volatile boolean gallerySeekable = false;
+    private volatile float pendingSeekPosition = -1.0f;
 
     public VlcPlayerManager(Context ctx) {
         this.context = ctx.getApplicationContext();
-        initEngine();
+        initEngineAsync();
     }
 
-    private void initEngine() {
-        try {
-            ArrayList<String> options = new ArrayList<String>();
-            // RTSP over TCP is mandatory for Gen5W cellular firewall / rmnet0 bypass
-            options.add("--rtsp-tcp");
-            // Dedicated 4 worker threads for the 4 physical Cortex-A7 CPU cores
-            options.add("--avcodec-threads=4");
-            // Software decoding pipeline: bypass buggy OMX.TCC.avcdec on KitKat
-            // LibVLC uses built-in ARM NEON SIMD assembly for crisp frames
-            options.add("--avcodec-hw=none");
-            // Fast decoding optimizations (fast IDCT, simplified motion compensation)
-            options.add("--avcodec-fast");
-            // Quiet non-critical logs
-            options.add("--no-stats");
-
-            libVLC = new LibVLC(context, options);
-            livePlayer = new MediaPlayer(libVLC);
-            galleryPlayer = new MediaPlayer(libVLC);
-            activeGalleryPlayer = galleryPlayer;
-
-            setupLiveEventListener();
-            setupGalleryEventListener(galleryPlayer, "REAR");
-
-            DebugLogger.log("VLC", "Standard LibVLC engine initialized (ARM NEON 4-thread software decoder ready)");
-        } catch (Throwable t) {
-            Log.e(TAG, "Failed to initialize standard LibVLC engine", t);
-            DebugLogger.log("VLC", "LibVLC standard init error: " + t.getMessage());
-        }
-
-        // Dedicated Keyframe Decoding Engine for 4K / 1440p HEVC Front Clips
-        // Uses dynamic incremental probing so options are verified before instantiation,
-        // guaranteeing that libVlcFront is 100% reliably created on Gen5W KitKat.
-        try {
-            ArrayList<String> baseFront = new ArrayList<String>();
-            // Proven baseline options
-            baseFront.add("--avcodec-threads=4");
-            baseFront.add("--avcodec-hw=none");
-            baseFront.add("--avcodec-fast");
-            baseFront.add("--no-stats");
-
-            // Keyframe & acceleration candidate options to probe
-            String[] probeCandidates = new String[] {
-                "--avcodec-skip-frame=3",
-                "--avcodec-skiploopfilter=4",
-                "--avcodec-skip-idct=3",
-                "--avcodec-hurry-up",
-                "--no-ts-trust-pcr"
-            };
-
-            for (String opt : probeCandidates) {
-                ArrayList<String> testList = new ArrayList<String>(baseFront);
-                testList.add(opt);
+    private void initEngineAsync() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
                 try {
-                    LibVLC testVlc = new LibVLC(context, testList);
-                    testVlc.release();
-                    baseFront.add(opt);
-                    DebugLogger.log("VLC", "Accepted LibVLC front option: " + opt);
-                } catch (Throwable t) {
-                    DebugLogger.log("VLC", "Rejected LibVLC front option: " + opt + " (" + t.getMessage() + ")");
+                    ArrayList<String> options = new ArrayList<String>();
+                    // RTSP over TCP is mandatory for Gen5W cellular firewall / rmnet0 bypass
+                    options.add("--rtsp-tcp");
+                    // Dedicated 4 worker threads for the 4 physical Cortex-A7 CPU cores
+                    options.add("--avcodec-threads=4");
+                    // Software decoding pipeline: bypass buggy OMX.TCC.avcdec on KitKat
+                    // LibVLC uses built-in ARM NEON SIMD assembly for crisp frames
+                    options.add("--avcodec-hw=none");
+                    // Fast decoding optimizations (fast IDCT, simplified motion compensation)
+                    options.add("--avcodec-fast");
+                    // Quiet non-critical logs
+                    options.add("--no-stats");
+
+                    final LibVLC createdLib = new LibVLC(context, options);
+                    final MediaPlayer createdLive = new MediaPlayer(createdLib);
+                    final MediaPlayer createdGallery = new MediaPlayer(createdLib);
+
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (released) {
+                                try { createdLive.release(); } catch (Throwable ignored) {}
+                                try { createdGallery.release(); } catch (Throwable ignored) {}
+                                try { createdLib.release(); } catch (Throwable ignored) {}
+                                return;
+                            }
+                            libVLC = createdLib;
+                            livePlayer = createdLive;
+                            galleryPlayer = createdGallery;
+
+                            setupLiveEventListener();
+                            setupGalleryEventListener();
+                            initialized = true;
+
+                            DebugLogger.log("VLC", "Consolidated LibVLC engine initialized asynchronously (ARM NEON 4-thread software decoder ready)");
+                            flushPendingActions();
+                        }
+                    });
+                } catch (final Throwable t) {
+                    Log.e(TAG, "Failed to initialize LibVLC engine", t);
+                    DebugLogger.log("VLC", "LibVLC async init error: " + t.getMessage());
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            initFailed = true;
+                            flushPendingActions();
+                        }
+                    });
                 }
             }
+        }, "FitcamxVlcInit").start();
+    }
 
-            libVlcFront = new LibVLC(context, baseFront);
-            frontGalleryPlayer = new MediaPlayer(libVlcFront);
-            setupGalleryEventListener(frontGalleryPlayer, "FRONT");
-            DebugLogger.log("VLC", "Dedicated 4K Front Keyframe LibVLC engine initialized successfully with " + baseFront.size() + " options");
-        } catch (Throwable t) {
-            Log.w(TAG, "libVlcFront init warning: " + t.getMessage());
-            DebugLogger.log("VLC", "libVlcFront init fallback warning: " + t.getMessage());
-            libVlcFront = null;
-            frontGalleryPlayer = null;
+    private void runWhenReady(Runnable action) {
+        if (released) return;
+        if (initialized || initFailed) {
+            action.run();
+        } else {
+            pendingReadyActions.add(action);
+        }
+    }
+
+    private void flushPendingActions() {
+        List<Runnable> copy = new ArrayList<Runnable>(pendingReadyActions);
+        pendingReadyActions.clear();
+        for (Runnable r : copy) {
+            r.run();
         }
     }
 
     public boolean isInitialized() {
-        return libVLC != null && livePlayer != null && galleryPlayer != null;
+        return initialized && !released && libVLC != null && livePlayer != null && galleryPlayer != null;
+    }
+
+    public boolean isAvailable() {
+        return !released && !initFailed;
     }
 
     // =========================================================================
@@ -293,7 +352,7 @@ public class VlcPlayerManager {
     public void recomputeLayout(final SurfaceView surfaceView, final boolean isLive) {
         if (surfaceView == null) return;
         double aspect = isLive ? liveAspect : galleryAspect;
-        MediaPlayer player = isLive ? livePlayer : activeGalleryPlayer;
+        MediaPlayer player = isLive ? livePlayer : galleryPlayer;
         IVLCVout vout = (player != null) ? player.getVLCVout() : null;
         applyVideoLayout(vout, surfaceView, aspect);
     }
@@ -326,42 +385,45 @@ public class VlcPlayerManager {
         });
     }
 
-    public void startLiveStream(SurfaceView surfaceView, String streamUrl, LiveListener listener) {
-        if (!isInitialized()) {
-            if (listener != null) listener.onError("LibVLC not initialized");
-            return;
-        }
+    public void startLiveStream(final SurfaceView surfaceView, final String streamUrl, final LiveListener listener) {
+        runWhenReady(new Runnable() {
+            @Override
+            public void run() {
+                if (!isInitialized()) {
+                    if (listener != null) listener.onError("LibVLC not initialized");
+                    return;
+                }
 
-        this.liveListener = listener;
-        this.attachedLiveSurfaceView = surfaceView;
+                liveListener = listener;
+                attachedLiveSurfaceView = surfaceView;
 
-        try {
-            stopLiveStream();
-            attachWithLayoutScaler(livePlayer, surfaceView, true);
+                try {
+                    stopLiveStream();
+                    attachWithLayoutScaler(livePlayer, surfaceView, true);
 
-            Uri uri = Uri.parse(streamUrl);
-            Media media = new Media(libVLC, uri);
-            media.setHWDecoderEnabled(false, false);
-            media.addOption(":rtsp-tcp");
-            media.addOption(":network-caching=500");
-            media.addOption(":no-audio"); // mute live preview to avoid vehicle audio interruption
-            media.addOption(":avcodec-threads=4");
-            media.addOption(":avcodec-fast");
-            media.addOption(":no-drop-late-frames");
-            media.addOption(":no-skip-frames");
-            media.addOption(":clock-jitter=0");
-            media.addOption(":clock-synchro=0");
+                    Uri uri = Uri.parse(streamUrl);
+                    Media media = new Media(libVLC, uri);
+                    media.setHWDecoderEnabled(false, false);
+                    media.addOption(":rtsp-tcp");
+                    media.addOption(":network-caching=300");
+                    media.addOption(":no-audio"); // mute live preview to avoid vehicle audio interruption
+                    media.addOption(":avcodec-threads=4");
+                    media.addOption(":avcodec-fast");
+                    media.addOption(":clock-jitter=0");
+                    media.addOption(":clock-synchro=0");
 
-            livePlayer.setMedia(media);
-            media.release();
+                    livePlayer.setMedia(media);
+                    media.release();
 
-            DebugLogger.log("VLC_LIVE", "Starting live RTSP/TCP: " + streamUrl);
-            livePlayer.play();
-        } catch (Throwable t) {
-            Log.e(TAG, "startLiveStream error", t);
-            DebugLogger.log("VLC_LIVE", "startLiveStream error: " + t.getMessage());
-            if (listener != null) listener.onError(t.getMessage());
-        }
+                    DebugLogger.log("VLC_LIVE", "Starting live RTSP/TCP: " + streamUrl);
+                    livePlayer.play();
+                } catch (Throwable t) {
+                    Log.e(TAG, "startLiveStream error", t);
+                    DebugLogger.log("VLC_LIVE", "startLiveStream error: " + t.getMessage());
+                    if (listener != null) listener.onError(t.getMessage());
+                }
+            }
+        });
     }
 
     public void stopLiveStream() {
@@ -384,36 +446,73 @@ public class VlcPlayerManager {
     // GALLERY / SD CARD / USB FOOTAGE PLAYBACK
     // =========================================================================
 
-    private void setupGalleryEventListener(final MediaPlayer player, final String tag) {
-        player.setEventListener(new MediaPlayer.EventListener() {
+    private void setupGalleryEventListener() {
+        galleryPlayer.setEventListener(new MediaPlayer.EventListener() {
             @Override
             public void onEvent(MediaPlayer.Event event) {
-                if (player != activeGalleryPlayer) return;
                 switch (event.type) {
                     case MediaPlayer.Event.Playing:
-                        DebugLogger.log("VLC_GAL", tag + " clip playing (Length: " + player.getLength() + "ms)");
-                        if (player == frontGalleryPlayer) {
-                            player.setRate(0.33f);
-                            DebugLogger.log("VLC_GAL", "Enforced front keyframe rate: 0.33x for slideshow review");
-                        } else {
-                            player.setRate(1.0f);
+                        galleryPaused = false;
+                        gallerySeekable = galleryPlayer.isSeekable();
+                        long playLen = galleryPlayer.getLength();
+                        DebugLogger.log("VLC_GAL", "Gallery clip playing (Length: " + playLen + "ms, Seekable: "
+                                + gallerySeekable + ", rate=" + targetGalleryRate + "x)");
+                        galleryPlayer.setRate(targetGalleryRate);
+                        if (pendingSeekPosition >= 0.0f) {
+                            float targetPos = Math.max(0.0f, Math.min(0.995f, pendingSeekPosition));
+                            pendingSeekPosition = -1.0f;
+                            if (gallerySeekable) {
+                                galleryPlayer.setPosition(targetPos);
+                            }
                         }
-                        if (galleryListener != null) galleryListener.onPlaying();
+                        if (galleryListener != null) {
+                            galleryListener.onPlaying(gallerySeekable, playLen);
+                        }
+                        break;
+                    case MediaPlayer.Event.Paused:
+                        galleryPaused = true;
+                        break;
+                    case MediaPlayer.Event.Stopped:
+                        galleryPaused = false;
                         break;
                     case MediaPlayer.Event.Buffering:
                         if (galleryListener != null) galleryListener.onBuffering(event.getBuffering());
                         break;
-                    case MediaPlayer.Event.TimeChanged:
+                    case MediaPlayer.Event.SeekableChanged:
+                        gallerySeekable = event.getSeekable();
                         if (galleryListener != null) {
-                            galleryListener.onTimeChanged(event.getTimeChanged(), player.getLength());
+                            galleryListener.onProgressChanged(galleryPlayer.getPosition(), galleryPlayer.getTime(),
+                                    galleryPlayer.getLength(), gallerySeekable);
+                        }
+                        break;
+                    case MediaPlayer.Event.PositionChanged:
+                        gallerySeekable = galleryPlayer.isSeekable();
+                        if (galleryListener != null) {
+                            galleryListener.onProgressChanged(event.getPositionChanged(), galleryPlayer.getTime(),
+                                    galleryPlayer.getLength(), gallerySeekable);
+                        }
+                        break;
+                    case MediaPlayer.Event.TimeChanged:
+                        gallerySeekable = galleryPlayer.isSeekable();
+                        if (galleryListener != null) {
+                            galleryListener.onProgressChanged(galleryPlayer.getPosition(), event.getTimeChanged(),
+                                    galleryPlayer.getLength(), gallerySeekable);
+                        }
+                        break;
+                    case MediaPlayer.Event.LengthChanged:
+                        if (galleryListener != null) {
+                            galleryListener.onProgressChanged(galleryPlayer.getPosition(), galleryPlayer.getTime(),
+                                    event.getLengthChanged(), gallerySeekable);
                         }
                         break;
                     case MediaPlayer.Event.EndReached:
-                        DebugLogger.log("VLC_GAL", tag + " clip reached end");
+                        galleryPaused = false;
+                        DebugLogger.log("VLC_GAL", "Gallery clip reached end");
                         if (galleryListener != null) galleryListener.onEndReached();
                         break;
                     case MediaPlayer.Event.EncounteredError:
-                        DebugLogger.log("VLC_GAL", tag + " clip playback error");
+                        galleryPaused = false;
+                        DebugLogger.log("VLC_GAL", "Gallery clip playback error");
                         if (galleryListener != null) galleryListener.onError("Playback error");
                         break;
                 }
@@ -422,15 +521,7 @@ public class VlcPlayerManager {
     }
 
     public void playGalleryClip(SurfaceView surfaceView, String playUri, GalleryListener listener) {
-        boolean isFront = true;
-        if (playUri != null) {
-            String u = playUri.toUpperCase();
-            if (u.endsWith("B.TS") || u.endsWith("B.MP4") || u.endsWith("B.MOV") ||
-                u.endsWith("R.TS") || u.endsWith("R.MP4") || u.endsWith("R.MOV") ||
-                u.contains("_B.") || u.contains("_R.") || u.contains("REAR")) {
-                isFront = false;
-            }
-        }
+        boolean isFront = !ClipItem.isRearFilename(playUri, playUri);
         playGalleryClip(surfaceView, playUri, isFront, isFront, listener);
     }
 
@@ -439,149 +530,170 @@ public class VlcPlayerManager {
     }
 
     public void playGalleryClip(SurfaceView surfaceView, String playUri, boolean isFront, boolean is4kFront, GalleryListener listener) {
-        if (!isInitialized()) {
-            if (listener != null) listener.onError("LibVLC not initialized");
-            return;
-        }
+        float defaultRate = getDefaultGalleryRate(isFront && is4kFront);
+        playGalleryClip(surfaceView, playUri, isFront, is4kFront, defaultRate, -1.0f, listener);
+    }
 
-        this.galleryListener = listener;
-        this.attachedGallerySurfaceView = surfaceView;
+    public void playGalleryClip(SurfaceView surfaceView, String playUri, boolean isFront,
+                                boolean is4kFront, float initialRate, GalleryListener listener) {
+        playGalleryClip(surfaceView, playUri, isFront, is4kFront, initialRate, -1.0f, listener);
+    }
 
-        try {
-            stopGalleryClip();
-
-            // Select specialized player engine:
-            // Only use the dedicated 4K keyframe engine if it is a Front clip AND recorded in high resolution (4K / 2K)
-            final boolean useFront4kEngine = isFront && is4kFront;
-            final MediaPlayer targetPlayer;
-            final LibVLC targetLibVlc;
-            if (useFront4kEngine && frontGalleryPlayer != null && libVlcFront != null) {
-                targetPlayer = frontGalleryPlayer;
-                targetLibVlc = libVlcFront;
-                DebugLogger.log("VLC_GAL", "Using dedicated Front 4K Keyframe Engine for: " + playUri);
-            } else {
-                targetPlayer = galleryPlayer;
-                targetLibVlc = libVLC;
-                DebugLogger.log("VLC_GAL", "Using standard AVC Engine (" + (isFront ? "Front 1080p" : "Rear 1080p") + ") for: " + playUri);
-            }
-            this.activeGalleryPlayer = targetPlayer;
-
-            attachWithLayoutScaler(targetPlayer, surfaceView, false);
-
-            Media media;
-            if (playUri.startsWith("http://") || playUri.startsWith("https://") || playUri.startsWith("file://")) {
-                media = new Media(targetLibVlc, Uri.parse(playUri));
-            } else {
-                media = new Media(targetLibVlc, playUri);
-            }
-
-            // Disable hardware decoders to prevent OMX.TCC.avcdec crashes
-            media.setHWDecoderEnabled(false, false);
-
-            // Common playback options:
-            // Audio is disabled completely during gallery review per user request
-            // (eliminates AudioTrack clock sync stalls and prevents car audio focus interruption)
-            media.addOption(":no-audio");
-            media.addOption(":clock-jitter=0");
-            media.addOption(":clock-synchro=0");
-
-            if (useFront4kEngine) {
-                // High-Resolution Front Camera Profile (4K / 1440p HEVC) - KEPT FULLY INTACT
-                if (playUri.startsWith("http://") || playUri.startsWith("https://")) {
-                    media.addOption(":network-caching=3000"); // 3s network cache for camera Wi-Fi streaming
-                } else {
-                    media.addOption(":file-caching=2000");
+    public void playGalleryClip(final SurfaceView surfaceView, final String playUri, final boolean isFront,
+                                final boolean is4kFront, final float initialRate, final float startSeekPosition,
+                                final GalleryListener listener) {
+        runWhenReady(new Runnable() {
+            @Override
+            public void run() {
+                if (!isInitialized()) {
+                    if (listener != null) listener.onError("LibVLC not initialized");
+                    return;
                 }
-                // Decouple stream clock and disable strict TS PCR pacing
-                media.addOption(":no-ts-trust-pcr");
-                // Keyframe-only decoding (I-frames only)
-                media.addOption(":avcodec-skip-frame=3"); // Discard all non-key frames (decode intra/keyframes only)
-                media.addOption(":avcodec-skiploopfilter=4"); // Skip in-loop deblocking filter for maximum CPU performance
-                media.addOption(":avcodec-skip-idct=3");
-                media.addOption(":avcodec-hurry-up=1");
-                media.addOption(":avcodec-threads=4");
-                media.addOption(":avcodec-fast=1");
-                DebugLogger.log("VLC_GAL", "Front high-res profile applied: keyframe-only (skip-frame=3, skiploopfilter=4, no-ts-trust-pcr)");
-            } else {
-                // 1080p Profile (Standard H.264 AVC for Front 1080p & Rear 1080p):
-                // Full 1.0x framerate, NO skip-idct (no gray areas!), NO skip-frame
-                if (playUri.startsWith("http://") || playUri.startsWith("https://")) {
-                    media.addOption(":network-caching=2500");
-                } else {
-                    media.addOption(":file-caching=1500");
+
+                final boolean useFront4kProfile = isFront && is4kFront;
+                galleryListener = listener;
+                attachedGallerySurfaceView = surfaceView;
+                targetGalleryRate = sanitizeGalleryRate(initialRate, useFront4kProfile);
+                pendingSeekPosition = startSeekPosition;
+                galleryPaused = false;
+                gallerySeekable = false;
+
+                try {
+                    stopGalleryClip();
+                    attachWithLayoutScaler(galleryPlayer, surfaceView, false);
+
+                    boolean isHttp = playUri.startsWith("http://") || playUri.startsWith("https://");
+                    Media media;
+                    if (isHttp || playUri.startsWith("file://")) {
+                        media = new Media(libVLC, Uri.parse(playUri));
+                    } else {
+                        media = new Media(libVLC, playUri);
+                    }
+
+                    // Disable hardware decoders to prevent OMX.TCC.avcdec crashes
+                    media.setHWDecoderEnabled(false, false);
+
+                    // Audio disabled during gallery review to avoid AudioTrack clock stalls & car audio focus steal
+                    media.addOption(":no-audio");
+                    media.addOption(":clock-jitter=0");
+                    media.addOption(":clock-synchro=0");
+                    // Enable byte-percentage position & seeking for headerless MPEG-TS (.TS) dashcam files
+                    media.addOption(":ts-seek-percent");
+
+                    if (useFront4kProfile) {
+                        if (isHttp) {
+                            media.addOption(":network-caching=2000");
+                        } else {
+                            media.addOption(":file-caching=600");
+                        }
+                        // Decouple stream clock and disable strict TS PCR pacing
+                        media.addOption(":no-ts-trust-pcr");
+                        // Keyframe-only decoding (I-frames only) + skip HEVC in-loop deblocking filter
+                        media.addOption(":avcodec-skip-frame=3");
+                        media.addOption(":avcodec-skiploopfilter=4");
+                        media.addOption(":avcodec-hurry-up=1");
+                        media.addOption(":avcodec-threads=4");
+                        media.addOption(":avcodec-fast=1");
+                        DebugLogger.log("VLC_GAL", "Front high-res HEVC profile applied: keyframe-only (rate=" + targetGalleryRate + "x)");
+                    } else {
+                        if (isHttp) {
+                            media.addOption(":network-caching=1500");
+                        } else {
+                            media.addOption(":file-caching=500");
+                        }
+                        media.addOption(":avcodec-threads=4");
+                        media.addOption(":avcodec-fast=1");
+                        DebugLogger.log("VLC_GAL", (isFront ? "Front" : "Rear") + " 1080p AVC profile applied (rate=" + targetGalleryRate + "x)");
+                    }
+
+                    galleryPlayer.setMedia(media);
+                    media.release();
+
+                    DebugLogger.log("VLC_GAL", "Starting gallery preview (" + (useFront4kProfile ? "FRONT 4K" : (isFront ? "FRONT 1080P" : "REAR 1080P")) + "): " + playUri);
+                    galleryPlayer.play();
+                    galleryPlayer.setRate(targetGalleryRate);
+                } catch (Throwable t) {
+                    Log.e(TAG, "playGalleryClip error", t);
+                    DebugLogger.log("VLC_GAL", "playGalleryClip error: " + t.getMessage());
+                    if (listener != null) listener.onError(t.getMessage());
                 }
-                media.addOption(":avcodec-threads=4");
-                media.addOption(":avcodec-fast=1");
-                DebugLogger.log("VLC_GAL", (isFront ? "Front" : "Rear") + " 1080p profile applied: full framerate AVC");
             }
-
-            targetPlayer.setMedia(media);
-            media.release();
-
-            DebugLogger.log("VLC_GAL", "Starting gallery preview (" + (useFront4kEngine ? "FRONT 4K" : (isFront ? "FRONT 1080P" : "REAR 1080P")) + "): " + playUri);
-            targetPlayer.play();
-            if (useFront4kEngine) {
-                targetPlayer.setRate(0.33f);
-                DebugLogger.log("VLC_GAL", "Requested front player rate: 0.33x for keyframe slideshow review");
-            } else {
-                targetPlayer.setRate(1.0f);
-            }
-        } catch (Throwable t) {
-            Log.e(TAG, "playGalleryClip error", t);
-            DebugLogger.log("VLC_GAL", "playGalleryClip error: " + t.getMessage());
-            if (listener != null) listener.onError(t.getMessage());
-        }
+        });
     }
 
     public void stopGalleryClip() {
         if (galleryPlayer != null) {
             try {
-                if (galleryPlayer.isPlaying()) {
+                if (galleryPlayer.isPlaying() || galleryPaused) {
                     galleryPlayer.stop();
                 }
+                galleryPaused = false;
+                gallerySeekable = false;
                 IVLCVout vout = galleryPlayer.getVLCVout();
                 if (vout != null && vout.areViewsAttached()) {
                     vout.detachViews();
                 }
             } catch (Throwable t) {
-                Log.w(TAG, "stopGalleryClip (rear) error: " + t.getMessage());
-            }
-        }
-        if (frontGalleryPlayer != null) {
-            try {
-                if (frontGalleryPlayer.isPlaying()) {
-                    frontGalleryPlayer.stop();
-                }
-                IVLCVout vout = frontGalleryPlayer.getVLCVout();
-                if (vout != null && vout.areViewsAttached()) {
-                    vout.detachViews();
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "stopGalleryClip (front) error: " + t.getMessage());
+                Log.w(TAG, "stopGalleryClip error: " + t.getMessage());
             }
         }
     }
 
     public boolean isGalleryPlaying() {
-        return activeGalleryPlayer != null && activeGalleryPlayer.isPlaying();
+        return galleryPlayer != null && galleryPlayer.isPlaying();
+    }
+
+    public boolean isGalleryPaused() {
+        return galleryPaused;
+    }
+
+    public boolean isGallerySeekable() {
+        return galleryPlayer != null && (gallerySeekable || galleryPlayer.isSeekable());
     }
 
     public void pauseGalleryClip() {
-        if (activeGalleryPlayer != null && activeGalleryPlayer.isPlaying()) {
-            activeGalleryPlayer.pause();
+        if (galleryPlayer != null && galleryPlayer.isPlaying()) {
+            galleryPlayer.pause();
+            galleryPaused = true;
         }
     }
 
     public void resumeGalleryClip() {
-        if (activeGalleryPlayer != null && !activeGalleryPlayer.isPlaying()) {
-            activeGalleryPlayer.play();
+        if (galleryPlayer != null && !galleryPlayer.isPlaying()) {
+            galleryPaused = false;
+            galleryPlayer.play();
+            galleryPlayer.setRate(targetGalleryRate);
         }
     }
 
-    public void seekGalleryClip(long timeMs) {
-        if (activeGalleryPlayer != null) {
-            activeGalleryPlayer.setTime(timeMs);
+    public void seekGalleryPosition(float position) {
+        if (galleryPlayer != null) {
+            float clamped = Math.max(0.0f, Math.min(0.995f, position));
+            try {
+                galleryPlayer.setPosition(clamped);
+                galleryPlayer.setRate(targetGalleryRate);
+            } catch (Throwable t) {
+                Log.w(TAG, "seekGalleryPosition error: " + t.getMessage());
+            }
         }
+    }
+
+    public long getGalleryLengthMs() {
+        return (galleryPlayer != null) ? galleryPlayer.getLength() : 0L;
+    }
+
+    public void setGalleryRate(float rate, boolean isHevc) {
+        float safeRate = sanitizeGalleryRate(rate, isHevc);
+        targetGalleryRate = safeRate;
+        if (galleryPlayer != null) {
+            try {
+                galleryPlayer.setRate(safeRate);
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    public float getGalleryRate() {
+        return targetGalleryRate;
     }
 
     // =========================================================================
@@ -589,6 +701,8 @@ public class VlcPlayerManager {
     // =========================================================================
 
     public void release() {
+        released = true;
+        pendingReadyActions.clear();
         try {
             stopLiveStream();
             stopGalleryClip();
@@ -609,24 +723,12 @@ public class VlcPlayerManager {
                 galleryPlayer = null;
             }
 
-            if (frontGalleryPlayer != null) {
-                if (frontGalleryPlayer.getVLCVout().areViewsAttached()) {
-                    frontGalleryPlayer.getVLCVout().detachViews();
-                }
-                frontGalleryPlayer.release();
-                frontGalleryPlayer = null;
-            }
-
-            if (libVlcFront != null) {
-                libVlcFront.release();
-                libVlcFront = null;
-            }
-
             if (libVLC != null) {
                 libVLC.release();
                 libVLC = null;
             }
-            DebugLogger.log("VLC", "LibVLC engines released cleanly");
+            initialized = false;
+            DebugLogger.log("VLC", "LibVLC engine released cleanly");
         } catch (Throwable t) {
             Log.w(TAG, "release error: " + t.getMessage());
         }

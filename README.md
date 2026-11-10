@@ -4,11 +4,29 @@
 [![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)]()
 [![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)]()
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v0.5.4-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v0.6.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
 A native, high-performance dashcam viewer and controller application specifically engineered for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" widescreen displays running Android 4.4.2 KitKat API 19).
 
 Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT96672 / NT96675 series chipsets).
+
+---
+
+## Screenshots
+
+The application is specifically engineered for Gen5W 24:9 ultra-widescreen infotainment displays (1920×720 and 2560×720), featuring ergonomic driver-side controls, centered 16:9 aspect-ratio video surfaces, and non-intrusive translucent overlays.
+
+### Live View (Front 4K Stream)
+*Sub-second RTSP live monitoring with real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
+![Live View - Front Camera](docs/screenshots/01_live_view.png)
+
+### SD Card Footage Gallery & Playback
+*Indexed SD card clip browser (`CARDV/MOVIE` & `CARDV/EMR`), filter chips, 4K HEVC playback with rate controls, translucent scrub bar overlay, and direct USB export.*
+![SD Card Footage Playback](docs/screenshots/02_gallery_playback.png)
+
+### Dual Camera Monitoring (Picture-in-Picture)
+*Simultaneous live front and rear camera monitoring with hardware-composited picture-in-picture.*
+![Dual Camera View](docs/screenshots/03_dual_pip_view.png)
 
 ---
 
@@ -18,16 +36,16 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 - Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
 
 ### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release package: [**`fitcamx-gen5w-v0.5.4-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.4/fitcamx-gen5w-v0.5.4-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.5.4-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.5.4)).
+1. Download the latest release package: [**`fitcamx-gen5w-v0.6.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.0/fitcamx-gen5w-v0.6.0-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.6.0-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.6.0)).
 2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
-   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.5.4.zip`.
+   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.6.0.zip`.
 3. Insert the flash drive into the vehicle's multimedia USB port.
 4. Open the **HMG-API** app on the infotainment screen.
 5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
 6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
 
 ### Method 2: NEMESIS Package Store
-1. Download [**`fitcamx-gen5w-v0.5.4-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.5.4/fitcamx-gen5w-v0.5.4-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.5.4-nemesis-package.zip`](dist/fitcamx-gen5w-v0.5.4-nemesis-package.zip)) and copy to your USB drive.
+1. Download [**`fitcamx-gen5w-v0.6.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.0/fitcamx-gen5w-v0.6.0-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.6.0-nemesis-package.zip`](dist/fitcamx-gen5w-v0.6.0-nemesis-package.zip)) and copy to your USB drive.
 2. Launch NEMESIS Manager on the head unit and install the package.
 
 > [!NOTE]

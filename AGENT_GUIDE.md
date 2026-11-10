@@ -48,9 +48,11 @@ fitcamx/
 │       │   ├── CameraClient.java        # Novatek CGI protocol client & state sync engine
 │       │   ├── VlcPlayerManager.java    # Embedded LibVLC player, RTSP stream playback & surface lifecycle
 │       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover state machine
-│       │   ├── UsbDownloader.java       # SD-to-USB chunked HTTP downloader
+│       │   ├── UsbDownloader.java       # Atomic (.part + fsync) SD-to-USB HTTP downloader
+│       │   ├── TsHeaderSniffer.java     # MPEG-TS / M2TS & MP4/MOV codec header sniffer
+│       │   ├── XmlListParser.java       # Sanitized XML & fallback regex clip-list parser
 │       │   ├── HmgapidClient.java       # Root daemon IPC client (LFD1 protocol over abstract UNIX socket)
-│       │   ├── DebugLogger.java         # Diagnostics aggregator & USB exporter
+│       │   ├── DebugLogger.java         # RAM-only diagnostics aggregator & USB exporter
 │       │   └── ClipItem.java            # Video clip metadata entity (filename, size, time, URL builder)
 │       └── main/jniLibs/armeabi-v7a/
 │           ├── libvlc.so                # LibVLC native engine (bundles FFmpeg / libavcodec)
@@ -60,10 +62,14 @@ fitcamx/
 │   ├── mod.json                    # HMG-API mod manifest (version, apps, services, permissions)
 │   ├── svc/
 │   │   └── reboot.sh               # Root execution script for head unit reboot
-│   └── icons/                      # 128x128 PNG icons for Gen5W launcher
+│   └── icons/                      # 128x128 PNG icons for Gen5W launcher (active + disabled)
 ├── tools/
-│   ├── build_package.py            # Complete build pipeline: aapt -> javac -> d8 -> zipalign -> sign
+│   ├── build_package.py            # Complete build pipeline: aapt -> javac -> R8 -> zipalign -> sign
+│   ├── proguard-rules.pro          # R8 shrinking & API 19 Dalvik compatibility rules
 │   └── sign.py                     # HMG-API ECDSA packaging and signature generator
+├── tests/
+│   ├── run_tests.py                # Automated build, JVM unit test & binary invariant runner
+│   └── FitcamUnitTests.java        # Unit & mock-HTTP integration test suite
 └── dist/                           # Release ZIP artifacts for HMG-API and NEMESIS USB sideloading
 ```
 
@@ -103,19 +109,18 @@ options.add("--no-stats");
 libVlc = new LibVLC(context, options);
 ```
 
-#### Per-Media Profiles & Playback Engines:
+#### Per-Media Profiles & Playback Engine:
+`VlcPlayerManager` initializes a **single shared `LibVLC` instance asynchronously** off the main UI thread (`FitcamxVlcInit`) and applies per-media decoding options via `Media.addOption(...)`:
 - **Live Stream (`startLiveStream`):**
-  - Uses standard LibVLC engine.
-  - Media options: `:rtsp-tcp`, `:network-caching=500`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`.
-  - *Note:* Live stream from Novatek is 720p/1080p H.264 (`rtsp://192.168.1.254/xxx.mov`), running smoothly with sub-second latency.
-- **Rear 1080p Clips (`playGalleryClip` with `isFront = false`):**
-  - Uses standard LibVLC engine at **1.0x full framerate**.
-  - Media options: `:no-audio`, `:network-caching=2500`, `:avcodec-threads=4`, `:avcodec-fast=1`.
-  - Decodes smoothly at 30 fps with 0 dropped frames.
-- **Front 4K / 1440p HEVC Clips (`playGalleryClip` with `isFront = true`):**
-  - Uses dedicated `libVlcFront` keyframe engine initialized with dynamic option probing (`--avcodec-skip-frame=3`, `--avcodec-skiploopfilter=4`, `--avcodec-skip-idct=3`, `--avcodec-hurry-up`, `--no-ts-trust-pcr`).
-  - Media options: `:no-audio`, `:no-ts-trust-pcr`, `:avcodec-skip-frame=3`, `:avcodec-skiploopfilter=4`, `:avcodec-skip-idct=3`, `:avcodec-hurry-up=1`, `:avcodec-threads=4`, `:avcodec-fast=1`.
-  - **Rate Dilation (`0.33x`):** `player.setRate(0.33f)` dilates presentation clock time by 3x. This guarantees the 1.0 GHz Cortex-A7 CPU has ample wall-clock time (~3s per keyframe) to decode and render without tripping VLC's native 5-second lateness watchdog (`modules/codec/avcodec/video.c`). Keyframes advance smoothly as a slideshow with zero dropped frames and zero gray noise.
+  - Media options: `:rtsp-tcp`, `:network-caching=300`, `:clock-jitter=0`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`.
+  - *Note:* Live stream from Novatek is 720p/1080p H.264 (`rtsp://192.168.1.254/xxx.mov`), running smoothly with sub-second latency and automatic late-frame dropping if Wi-Fi jitters.
+- **1080p AVC Clips (`playGalleryClip` with `useKeyframeMode = false`):**
+  - Always defaults to **1.0x full framerate** on each new clip, and allows cycling `1.0x` → `0.5x` → `0.33x` → `1.0x`.
+  - Media options: `:no-audio`, `:ts-seek-percent`, `:network-caching=1500` (`:file-caching=500` on USB), `:avcodec-threads=4`, `:avcodec-fast=1`.
+- **4K / 1440p HEVC Clips (`playGalleryClip` with `useKeyframeMode = true`):**
+  - Media options: `:no-audio`, `:ts-seek-percent`, `:no-ts-trust-pcr`, `:avcodec-skip-frame=3`, `:avcodec-skiploopfilter=4`, `:avcodec-hurry-up=1`, `:avcodec-threads=4`, `:avcodec-fast=1`.
+  - **Rate Dilation (`0.33x` default, user-toggleable `0.33x` ↔ `0.5x`; `1.0x` disallowed):** `player.setRate(0.33f)` dilates presentation clock time by 3x so the 1.0 GHz Cortex-A7 CPU has ample wall-clock time to decode and render each HEVC keyframe without tripping VLC's lateness watchdog.
+  - **Overlaid Scrub Bar (`layout_gallery_seek_overlay`):** Composites inside `frame_gallery_container` above the `SurfaceView` punch-through layer without shrinking video bounds, auto-hiding after 3.5s of playback (tap video to toggle).
   - *Note:* Always call `media.setHWDecoderEnabled(false, false)` to avoid Stagefright OMX crashes on KitKat.
 
 ---
@@ -160,6 +165,7 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 ## 5. Wi-Fi Handover & Invariant Management (`WifiBridge.java`)
 
 The Gen5W head unit has a single physical Wi-Fi chipset. It cannot run in concurrent SoftAP (Hotspot for wireless projection) and Station (Client) mode.
+- **Fast Reconnect & Zero-Wear Profile Retention:** Once a dashcam is verified over HTTP, its identity (`ssid`, `ip`, `soc`, `port`) is persisted strictly once on change, and its `wpa_supplicant` `WifiConfiguration` (`priority=100`, pure WPA2-CCMP when `[WPA2-PSK-CCMP]` is advertised) is retained across exits (disabled in RAM on teardown rather than removed/re-saved on every launch). On subsequent launches, `WIFI_STATE_ENABLED` associates directly with the saved `networkId` without waiting for a full scan or colliding with background networks, begins `150ms` DHCP polling immediately upon `SupplicantState.COMPLETED`, and falls back to active scanning if the camera is absent or replaced.
 ```
                       [ User Launches FITCAMX ]
                                   │
@@ -241,23 +247,24 @@ The HMG-API platform runs a background daemon `hmgapid` as `root`, listening on 
 
 ---
 
-## 8. Build, Packaging, and Signing Pipeline
+## 8. Build, Packaging, Signing, and Verification Pipeline
 
-To build and sign the complete suite of release packages:
-```powershell
-python tools/build_package.py
+To build, sign, and run the automated verification suite:
+```bash
+./build.sh
+python3 tests/run_tests.py
 ```
-The script performs the following tasks:
+`tools/build_package.py` performs the following tasks:
 1. Compiles Java source files with `javac --release 8` against `android-19/android.jar` and `libvlc.jar`.
-2. Converts bytecode with `d8 --min-api 19` into `classes.dex`.
+2. Shrinks and converts bytecode with `R8 --min-api 19` (`tools/proguard-rules.pro`) into Dalvik `classes.dex` (`dex 035`), stripping post-KitKat classes (`AudioDeviceCallback`, `androidx.lifecycle.Observer`, unused UI widgets).
 3. Injects `classes.dex` and `armeabi-v7a` native libraries (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`) into `unsigned.apk`.
 4. Executes `zipalign -f 4`.
-5. Signs `Fitcamx.apk` with `apksigner` using a dedicated 2048-bit RSA keystore (v1 JAR signature only).
+5. Signs `Fitcamx.apk` with `apksigner` using a 2048-bit RSA keystore (strictly v1 JAR signature: `--v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false`).
 6. Stages the mod directory, invokes `sign.py` with ECDSA SHA256 author keys, and outputs:
-   - `dist/fitcamx-gen5w-v0.5.4.hmgapi.zip`
-   - `dist/fitcamx-gen5w-v0.5.4-hmgapi-usb.zip`
-   - `dist/fitcamx-gen5w-v0.5.4-nemesis-usb.zip`
-   - `dist/fitcamx-gen5w-v0.5.4-nemesis-package.zip`
+   - `dist/fitcamx-gen5w-v0.6.0.hmgapi.zip`
+   - `dist/fitcamx-gen5w-v0.6.0-hmgapi-usb.zip`
+   - `dist/fitcamx-gen5w-v0.6.0-nemesis-usb.zip`
+   - `dist/fitcamx-gen5w-v0.6.0-nemesis-package.zip`
 
 ---
 

@@ -39,7 +39,7 @@
                 android:id="@+id/tv_app_version"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="v0.5.3"
+                android:text="v0.6.0"
                 android:textColor="@color/text_secondary"
                 android:textSize="11sp" />
         </LinearLayout>
@@ -496,6 +496,21 @@
                         android:maxLines="1"
                         android:ellipsize="middle" />
 
+                    <!-- Playback Speed Selector (4K: 0.33x / 0.5x | 1080p: 1.0x / 0.5x / 0.33x) -->
+                    <Button
+                        android:id="@+id/btn_playback_rate"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:paddingLeft="10dp"
+                        android:paddingRight="10dp"
+                        android:layout_marginRight="6dp"
+                        android:background="@color/bg_button"
+                        android:text="--"
+                        android:enabled="false"
+                        android:textColor="@color/accent_gold"
+                        android:textStyle="bold"
+                        android:textSize="12sp" />
+
                     <!-- Play / Pause Button -->
                     <Button
                         android:id="@+id/btn_play_clip"
@@ -545,17 +560,55 @@
                         android:layout_height="54dp"
                         android:layout_gravity="center"
                         android:visibility="gone" />
+
+                    <!-- Translucent Scrub Bar Overlay (Auto-hides during playback; tap video to toggle) -->
+                    <LinearLayout
+                        android:id="@+id/layout_gallery_seek_overlay"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="bottom"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:background="#B3000000"
+                        android:paddingLeft="12dp"
+                        android:paddingRight="14dp"
+                        android:paddingTop="4dp"
+                        android:paddingBottom="4dp"
+                        android:clickable="true"
+                        android:visibility="gone">
+
+                        <SeekBar
+                            android:id="@+id/sb_gallery_seek"
+                            android:layout_width="0dp"
+                            android:layout_height="38dp"
+                            android:layout_weight="1"
+                            android:paddingTop="4dp"
+                            android:paddingBottom="4dp"
+                            android:max="1000"
+                            android:progress="0"
+                            android:enabled="false" />
+
+                        <TextView
+                            android:id="@+id/tv_seek_position"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginLeft="8dp"
+                            android:text="0%"
+                            android:textColor="#ffffff"
+                            android:textSize="12sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
                 </FrameLayout>
 
-                <!-- Footer Bar below video: Progress, Status & Details -->
+                <!-- Slim Footer Bar below video: Download Progress, Status & Details -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:paddingLeft="10dp"
                     android:paddingRight="10dp"
-                    android:paddingTop="4dp"
-                    android:paddingBottom="4dp"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
                     android:background="@color/bg_panel">
 
                     <ProgressBar

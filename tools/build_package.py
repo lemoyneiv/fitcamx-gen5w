@@ -2,17 +2,37 @@
 import os, sys, glob, shutil, subprocess, zipfile
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SDK_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "tools", "android-sdk"))
-JDK_BIN = r"C:\Program Files\Microsoft\jdk-17.0.21.21-hotspot\bin"
 
-JAVA = os.path.join(JDK_BIN, "java.exe")
-JAVAC = os.path.join(JDK_BIN, "javac.exe")
-KEYTOOL = os.path.join(JDK_BIN, "keytool.exe")
+is_win = sys.platform.startswith("win")
+exe_suffix = ".exe" if is_win else ""
+
+java_home = os.environ.get("JAVA_HOME")
+if not java_home or not os.path.isdir(java_home):
+    candidate_homes = [
+        os.path.abspath(os.path.join(BASE_DIR, "..", "tools", "jdk-17")),
+        os.path.expanduser("~/tools/jdk-17"),
+        r"C:\Program Files\Microsoft\jdk-17.0.21.21-hotspot",
+    ]
+    java_home = next((d for d in candidate_homes if os.path.isdir(d)), candidate_homes[0])
+
+JDK_BIN = os.path.join(java_home, "bin")
+JAVA = os.path.join(JDK_BIN, f"java{exe_suffix}") if os.path.isfile(os.path.join(JDK_BIN, f"java{exe_suffix}")) else (shutil.which("java") or "java")
+JAVAC = os.path.join(JDK_BIN, f"javac{exe_suffix}") if os.path.isfile(os.path.join(JDK_BIN, f"javac{exe_suffix}")) else (shutil.which("javac") or "javac")
+KEYTOOL = os.path.join(JDK_BIN, f"keytool{exe_suffix}") if os.path.isfile(os.path.join(JDK_BIN, f"keytool{exe_suffix}")) else (shutil.which("keytool") or "keytool")
+
+SDK_DIR = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+if not SDK_DIR or not os.path.isdir(SDK_DIR):
+    candidate_sdk = [
+        os.path.abspath(os.path.join(BASE_DIR, "..", "tools", "android-sdk")),
+        os.path.expanduser("~/tools/android-sdk"),
+    ]
+    SDK_DIR = next((d for d in candidate_sdk if os.path.isdir(d)), candidate_sdk[0])
+
 ANDROID_JAR = os.path.join(SDK_DIR, "platforms", "android-19", "android.jar")
 BT_DIR = os.path.join(SDK_DIR, "build-tools", "30.0.3")
 
-AAPT = os.path.join(BT_DIR, "aapt.exe")
-ZIPALIGN = os.path.join(BT_DIR, "zipalign.exe")
+AAPT = os.path.join(BT_DIR, f"aapt{exe_suffix}")
+ZIPALIGN = os.path.join(BT_DIR, f"zipalign{exe_suffix}")
 D8_JAR = os.path.join(BT_DIR, "lib", "d8.jar")
 APKSIGNER_JAR = os.path.join(BT_DIR, "lib", "apksigner.jar")
 
@@ -23,8 +43,8 @@ APP_KEYSTORE = os.path.join(KEYS_DIR, "fitcamx-app.keystore")
 BUILD_DIR = os.path.join(BASE_DIR, "build")
 DIST_DIR = os.path.join(BASE_DIR, "dist")
 
-os.environ["JAVA_HOME"] = r"C:\Program Files\Microsoft\jdk-17.0.21.21-hotspot"
-os.environ["PATH"] = JDK_BIN + ";" + BT_DIR + ";" + os.environ.get("PATH", "")
+os.environ["JAVA_HOME"] = java_home
+os.environ["PATH"] = JDK_BIN + os.pathsep + BT_DIR + os.pathsep + os.environ.get("PATH", "")
 
 print("=== FITCAMX Gen5W Build System ===")
 print("Base directory:", BASE_DIR)
@@ -67,21 +87,23 @@ cmd_javac = [
 subprocess.run(cmd_javac, check=True)
 print("  Compiled", len(java_srcs), "Java source files.")
 
-# 3. Convert class files to Dalvik dex (min-api 19)
-print("\n[3/6] Converting bytecode to Dalvik DEX via d8...")
+# 3. Shrink, optimize & convert class files to Dalvik dex (min-api 19) via R8
+print("\n[3/6] Shrinking & converting bytecode to Dalvik DEX via R8 (min-api 19)...")
 class_files = []
 for root, _, files in os.walk(os.path.join(BUILD_DIR, "classes")):
     for f in files:
         if f.endswith(".class"):
             class_files.append(os.path.join(root, f))
 
-cmd_d8 = [
-    JAVA, "-cp", D8_JAR, "com.android.tools.r8.D8",
+proguard_rules = os.path.join(BASE_DIR, "tools", "proguard-rules.pro")
+cmd_r8 = [
+    JAVA, "-cp", D8_JAR, "com.android.tools.r8.R8",
     "--release", "--min-api", "19",
     "--lib", ANDROID_JAR,
+    "--pg-conf", proguard_rules,
     "--output", os.path.join(BUILD_DIR, "dex")
 ] + lib_jars + class_files
-subprocess.run(cmd_d8, check=True)
+subprocess.run(cmd_r8, check=True)
 dex_file = os.path.join(BUILD_DIR, "dex", "classes.dex")
 print("  Generated classes.dex (", os.path.getsize(dex_file), "bytes)")
 
@@ -136,6 +158,7 @@ cmd_sign = [
     "--min-sdk-version", "19",
     "--v1-signing-enabled", "true",
     "--v2-signing-enabled", "false",
+    "--v3-signing-enabled", "false",
     "--out", final_apk,
     aligned_apk
 ]

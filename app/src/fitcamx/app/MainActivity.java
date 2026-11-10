@@ -11,14 +11,17 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.ListView;
 import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -73,6 +76,9 @@ public class MainActivity extends Activity {
 
     // Gallery Mode Elements
     private View layoutGalleryMode;
+    private View frameGalleryContainer;
+    private View layoutGallerySeekOverlay;
+    private TextView tvSeekPosition;
     private ListView lvClips;
     private TextView tvClipCount;
     private TextView tvEmptyGallery;
@@ -89,12 +95,26 @@ public class MainActivity extends Activity {
     private TextView tvUsbStatus;
     private ProgressBar pbDownloadProgress;
     private TextView tvDownloadStats;
+    private SeekBar sbGallerySeek;
+    private Button btnPlaybackRate;
     private Button btnPlayClip;
     private Button btnDownloadToUsb;
     private View layoutGalleryListColumn;
     private Button btnToggleGalleryList;
 
+    private static final long SEEK_OVERLAY_AUTO_HIDE_MS = 3500L;
+
     // State
+    private final Handler lifecycleHandler = new Handler(Looper.getMainLooper());
+    private boolean isExiting = false;
+    private boolean isActivityVisible = true;
+    private boolean suspendedInBackground = false;
+    private boolean isUserSeeking = false;
+    private boolean galleryEnded = false;
+    private long currentGalleryDurationMs = 0L;
+    private boolean currentGalleryClipIsHevc = false;
+    private float lastKnownGalleryPosition = 0.0f;
+
     private boolean is1080pMode = false; // Default to 4K UHD (native front camera resolution)
     private int camera4kIndex = 6; // Default to 6 (Fitcamx NT96670 4K UHD mode index)
     private int currentViewMode = CameraClient.VIEW_FRONT; // 0=Front, 1=Rear, 2=Dual (Both)
@@ -119,8 +139,9 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         try {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             DebugLogger.init(this);
-            DebugLogger.log("MAIN", "MainActivity created (Gen5W FITCAMX v0.5.4)");
+            DebugLogger.log("MAIN", "MainActivity created (Gen5W FITCAMX v0.6.0)");
             setContentView(R.layout.activity_main);
             initViews();
             setupListeners();
@@ -161,12 +182,12 @@ public class MainActivity extends Activity {
                         tvDiagInfo.setText("Camera: " + socType.displayName + " (" + cameraIp + ") | " + diagDetails);
                     }
 
-                    // Auto-sync car clock on connection
-                    cameraClient.syncCarTime(null);
-                    syncCameraSettings();
-
-                    // Start Live stream with priority candidate ladder
+                    // Start Live stream immediately first on the CGI queue so video appears ASAP
                     startLiveStream();
+
+                    // Queue settings sync & car clock sync right behind live stream startup
+                    syncCameraSettings();
+                    cameraClient.syncCarTime(null);
                 }
 
                 @Override
@@ -271,7 +292,7 @@ public class MainActivity extends Activity {
                 String vName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
                 tvAppVersion.setText("v" + vName);
             } catch (Exception e) {
-                tvAppVersion.setText("v0.5.4");
+                tvAppVersion.setText("v0.6.0");
             }
         }
 
@@ -323,6 +344,9 @@ public class MainActivity extends Activity {
 
         // Gallery Views
         layoutGalleryMode = findViewById(R.id.layout_gallery_mode);
+        frameGalleryContainer = findViewById(R.id.frame_gallery_container);
+        layoutGallerySeekOverlay = findViewById(R.id.layout_gallery_seek_overlay);
+        tvSeekPosition = (TextView) findViewById(R.id.tv_seek_position);
         surfaceGallery = (SurfaceView) findViewById(R.id.surface_gallery);
         if (surfaceGallery != null) {
             surfaceGallery.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -354,6 +378,8 @@ public class MainActivity extends Activity {
         tvUsbStatus = (TextView) findViewById(R.id.tv_usb_status);
         pbDownloadProgress = (ProgressBar) findViewById(R.id.pb_download_progress);
         tvDownloadStats = (TextView) findViewById(R.id.tv_download_stats);
+        sbGallerySeek = (SeekBar) findViewById(R.id.sb_gallery_seek);
+        btnPlaybackRate = (Button) findViewById(R.id.btn_playback_rate);
         btnPlayClip = (Button) findViewById(R.id.btn_play_clip);
         btnDownloadToUsb = (Button) findViewById(R.id.btn_download_to_usb);
         layoutGalleryListColumn = findViewById(R.id.layout_gallery_list_column);
@@ -622,17 +648,21 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Play / Pause Selected Clip
+        // Play / Pause / Replay Selected Clip
         btnPlayClip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (selectedClip != null) {
-                    if (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying()) {
+                    if (galleryEnded) {
+                        playGalleryPreview(selectedClip);
+                    } else if (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying()) {
                         vlcPlayerManager.pauseGalleryClip();
                         btnPlayClip.setText("Resume");
-                    } else if (vlcPlayerManager != null && vlcPlayerManager.isInitialized()) {
+                        showGallerySeekOverlay(false);
+                    } else if (vlcPlayerManager != null && vlcPlayerManager.isGalleryPaused()) {
                         btnPlayClip.setText("Pause");
                         vlcPlayerManager.resumeGalleryClip();
+                        showGallerySeekOverlay(true);
                     } else {
                         playGalleryPreview(selectedClip);
                     }
@@ -641,6 +671,96 @@ public class MainActivity extends Activity {
                 }
             }
         });
+
+        // Tap anywhere on the Gallery video container to toggle the overlaid scrub bar
+        if (frameGalleryContainer != null) {
+            frameGalleryContainer.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (selectedClip == null || layoutGallerySeekOverlay == null) return;
+                    if (layoutGallerySeekOverlay.getVisibility() == View.VISIBLE) {
+                        if (!isUserSeeking) {
+                            hideGallerySeekOverlay();
+                        }
+                    } else {
+                        boolean autoHide = (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying() && !galleryEnded);
+                        showGallerySeekOverlay(autoHide);
+                    }
+                }
+            });
+        }
+
+        // Playback Speed Toggle (4K HEVC: 0.33x <-> 0.5x | 1080p AVC: 1.0x -> 0.5x -> 0.33x -> 1.0x)
+        if (btnPlaybackRate != null) {
+            btnPlaybackRate.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (selectedClip == null || vlcPlayerManager == null) {
+                        Toast.makeText(MainActivity.this, "Select a clip first", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    float current = vlcPlayerManager.getGalleryRate();
+                    float nextRate = VlcPlayerManager.getNextGalleryRate(current, currentGalleryClipIsHevc);
+                    updatePlaybackRateButton(nextRate);
+                    vlcPlayerManager.setGalleryRate(nextRate, currentGalleryClipIsHevc);
+                }
+            });
+        }
+
+        // Gallery Timeline Scrubbing SeekBar (supports byte-percentage seeking on MPEG-TS & time seeking on MP4)
+        if (sbGallerySeek != null) {
+            sbGallerySeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                @Override
+                public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    if (fromUser && selectedClip != null) {
+                        if (currentGalleryDurationMs > 0) {
+                            long targetSec = ((currentGalleryDurationMs * progress) / 1000L) / 1000L;
+                            long totSec = currentGalleryDurationMs / 1000L;
+                            String timeLabel = String.format(java.util.Locale.US, "%02d:%02d / %02d:%02d",
+                                    targetSec / 60, targetSec % 60, totSec / 60, totSec % 60);
+                            if (tvSeekPosition != null) {
+                                tvSeekPosition.setText(timeLabel);
+                            }
+                            tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Seek: " + timeLabel);
+                        } else {
+                            int pct = Math.min(100, Math.max(0, progress / 10));
+                            if (tvSeekPosition != null) {
+                                tvSeekPosition.setText(pct + "%");
+                            }
+                            tvClipDetails.setText(String.format(java.util.Locale.US, "Size: %s | Seek: %d%% | Time: %s",
+                                    selectedClip.getFormattedSize(), pct, selectedClip.timeStr));
+                        }
+                    }
+                }
+
+                @Override
+                public void onStartTrackingTouch(SeekBar seekBar) {
+                    isUserSeeking = true;
+                    showGallerySeekOverlay(false);
+                }
+
+                @Override
+                public void onStopTrackingTouch(SeekBar seekBar) {
+                    float targetPos = Math.max(0.0f, Math.min(0.995f, seekBar.getProgress() / 1000.0f));
+                    isUserSeeking = false;
+                    if (selectedClip != null && vlcPlayerManager != null) {
+                        if (galleryEnded) {
+                            startGalleryPreviewAt(selectedClip, targetPos, false);
+                        } else if (vlcPlayerManager.isGallerySeekable()) {
+                            lastKnownGalleryPosition = targetPos;
+                            vlcPlayerManager.seekGalleryPosition(targetPos);
+                            showGallerySeekOverlay(!vlcPlayerManager.isGalleryPaused());
+                        } else {
+                            sbGallerySeek.setProgress(Math.round(lastKnownGalleryPosition * 1000.0f));
+                            showGallerySeekOverlay(!vlcPlayerManager.isGalleryPaused());
+                            Toast.makeText(MainActivity.this,
+                                    "Camera Wi-Fi stream does not support scrubbing — Save to USB to scrub freely",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                }
+            });
+        }
 
         // Download to USB Drive
         btnDownloadToUsb.setOnClickListener(new View.OnClickListener() {
@@ -842,6 +962,7 @@ public class MainActivity extends Activity {
 
     private void switchTab(boolean showLive) {
         if (showLive) {
+            hideGallerySeekOverlay();
             btnTabLive.setBackgroundColor(getResources().getColor(R.color.accent_blue));
             btnTabGallery.setBackgroundColor(getResources().getColor(R.color.bg_button));
             layoutLiveMode.setVisibility(View.VISIBLE);
@@ -922,7 +1043,7 @@ public class MainActivity extends Activity {
                             return;
                         }
 
-                        if (vlcPlayerManager != null && vlcPlayerManager.isInitialized()) {
+                        if (vlcPlayerManager != null && vlcPlayerManager.isAvailable()) {
                             tryPlayVlcCandidate(candidates, 0, modeToStart);
                         } else {
                             addDiagLog("VLC engine not ready for live stream");
@@ -945,7 +1066,7 @@ public class MainActivity extends Activity {
                         }
 
                         List<String> fallbacks = cameraClient.getCandidateStreamUrls(modeToStart);
-                        if (vlcPlayerManager != null && vlcPlayerManager.isInitialized()) {
+                        if (vlcPlayerManager != null && vlcPlayerManager.isAvailable()) {
                             tryPlayVlcCandidate(fallbacks, 0, modeToStart);
                         }
                     }
@@ -1082,20 +1203,91 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void updatePlaybackRateButton(float rate) {
+        if (btnPlaybackRate == null) return;
+        if (Math.abs(rate - 0.33f) < 0.05f) {
+            btnPlaybackRate.setText("0.33x");
+        } else if (Math.abs(rate - 0.5f) < 0.05f) {
+            btnPlaybackRate.setText("0.5x");
+        } else {
+            btnPlaybackRate.setText(String.format(java.util.Locale.US, "%.1fx", rate));
+        }
+    }
+
+    private final Runnable hideSeekOverlayRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isUserSeeking || galleryEnded) return;
+            if (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying()) {
+                if (layoutGallerySeekOverlay != null) {
+                    layoutGallerySeekOverlay.setVisibility(View.GONE);
+                }
+            }
+        }
+    };
+
+    private void showGallerySeekOverlay(boolean autoHide) {
+        lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
+        if (layoutGallerySeekOverlay != null) {
+            layoutGallerySeekOverlay.setVisibility(View.VISIBLE);
+        }
+        if (autoHide) {
+            lifecycleHandler.postDelayed(hideSeekOverlayRunnable, SEEK_OVERLAY_AUTO_HIDE_MS);
+        }
+    }
+
+    private void hideGallerySeekOverlay() {
+        lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
+        if (layoutGallerySeekOverlay != null) {
+            layoutGallerySeekOverlay.setVisibility(View.GONE);
+        }
+    }
+
     private void playGalleryPreview(final ClipItem clip) {
+        startGalleryPreviewAt(clip, -1.0f, true);
+    }
+
+    private void startGalleryPreviewAt(final ClipItem clip, final float startSeekPos, final boolean resetRate) {
         if (clip == null) return;
+        galleryEnded = false;
+        currentGalleryDurationMs = 0L;
+        lastKnownGalleryPosition = (startSeekPos >= 0.0f) ? startSeekPos : 0.0f;
+        if (sbGallerySeek != null) {
+            sbGallerySeek.setProgress(Math.round(lastKnownGalleryPosition * 1000.0f));
+            sbGallerySeek.setEnabled(false);
+        }
+        if (tvSeekPosition != null) {
+            int initPct = Math.min(100, Math.max(0, Math.round(lastKnownGalleryPosition * 100.0f)));
+            tvSeekPosition.setText(initPct + "%");
+        }
+        showGallerySeekOverlay(false);
         pbGalleryLoading.setVisibility(View.VISIBLE);
         if (surfaceGallery != null) {
             surfaceGallery.setVisibility(View.VISIBLE);
         }
         if (vlcPlayerManager != null) vlcPlayerManager.stopGalleryClip();
 
-        // Check if clip is already downloaded on USB drive
+        // Check if clip is already completely downloaded on USB drive (verify byte size & absence of .part file)
         File usbFolder = UsbDownloader.getUsbDestinationFolder();
         File localFile = (usbFolder != null) ? new File(usbFolder, clip.filename) : null;
+        File partFile = (usbFolder != null) ? new File(usbFolder, clip.filename + ".part") : null;
         final String playUri;
+        boolean verifiedLocalUsb = false;
 
-        if (localFile != null && localFile.exists() && localFile.length() > 0) {
+        if (localFile != null && localFile.exists() && localFile.length() > 0
+                && (partFile == null || !partFile.exists())) {
+            boolean sizeMatches = (clip.sizeBytes <= 0)
+                    || (Math.abs(localFile.length() - clip.sizeBytes) <= 65536L);
+            if (sizeMatches) {
+                verifiedLocalUsb = true;
+            } else {
+                DebugLogger.log("USB_VERIFY", "Deleting incomplete local USB file " + localFile.getName()
+                        + " (local=" + localFile.length() + ", expected=" + clip.sizeBytes + ")");
+                localFile.delete();
+            }
+        }
+
+        if (verifiedLocalUsb) {
             playUri = localFile.getAbsolutePath();
             addDiagLog("Previewing from local USB (" + (clip.isFront ? "FRONT" : "REAR") + "): " + localFile.getName() + " (" + (localFile.length() / (1024 * 1024)) + "MB)");
         } else {
@@ -1104,28 +1296,29 @@ public class MainActivity extends Activity {
             addDiagLog("Previewing clip via camera Wi-Fi (" + (clip.isFront ? "FRONT" : "REAR") + "): " + playUri);
         }
 
-        if (vlcPlayerManager == null || !vlcPlayerManager.isInitialized()) {
+        if (vlcPlayerManager == null || !vlcPlayerManager.isAvailable()) {
             pbGalleryLoading.setVisibility(View.GONE);
             Toast.makeText(MainActivity.this, "VLC Player engine not available", Toast.LENGTH_SHORT).show();
             return;
         }
 
         final boolean isFront = clip.isFront;
+        final boolean isLocalUsb = verifiedLocalUsb;
 
         // Rear clips are ALWAYS 1080p AVC
         if (!isFront) {
-            startGalleryPlaybackInternal(clip, playUri, false, false);
+            startGalleryPlaybackInternal(clip, playUri, false, false, isLocalUsb, startSeekPos, resetRate);
             return;
         }
 
         // For Front clips: check cached codec first
         if (clip.isHevc != null) {
             boolean is4kFront = clip.isHevc;
-            startGalleryPlaybackInternal(clip, playUri, true, is4kFront);
+            startGalleryPlaybackInternal(clip, playUri, true, is4kFront, isLocalUsb, startSeekPos, resetRate);
             return;
         }
 
-        // Sniff TS header in background thread (<20ms) to detect whether this specific file is HEVC or AVC
+        // Sniff media header in background thread (<20ms) to detect whether this specific file is HEVC or AVC
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -1134,11 +1327,11 @@ public class MainActivity extends Activity {
                 if (codec == TsHeaderSniffer.CODEC_HEVC) {
                     clip.isHevc = true;
                     is4kFront = true;
-                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 4K/2K HEVC (stream 0x24)");
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 4K/2K HEVC");
                 } else if (codec == TsHeaderSniffer.CODEC_AVC) {
                     clip.isHevc = false;
                     is4kFront = false;
-                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 1080p AVC (stream 0x1B)");
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 1080p AVC");
                 } else {
                     // Fallback to active camera mode if sniffer cannot read header
                     is4kFront = !is1080pMode;
@@ -1150,24 +1343,45 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         if (selectedClip == clip) {
-                            startGalleryPlaybackInternal(clip, playUri, true, is4kFront);
+                            startGalleryPlaybackInternal(clip, playUri, true, is4kFront, isLocalUsb, startSeekPos, resetRate);
                         }
                     }
                 });
             }
-        }).start();
+        }, "FitcamxSniffer").start();
     }
 
-    private void startGalleryPlaybackInternal(final ClipItem clip, final String playUri, final boolean isFront, final boolean is4kFront) {
-        vlcPlayerManager.playGalleryClip(surfaceGallery, playUri, isFront, is4kFront, new VlcPlayerManager.GalleryListener() {
+    private void startGalleryPlaybackInternal(final ClipItem clip, final String playUri, final boolean isFront,
+                                              final boolean is4kFront, final boolean isLocalUsb,
+                                              final float startSeekPos, final boolean resetRate) {
+        final boolean isHevcClip = isFront && is4kFront;
+        currentGalleryClipIsHevc = isHevcClip;
+        final float chosenRate = resetRate
+                ? VlcPlayerManager.getDefaultGalleryRate(isHevcClip)
+                : VlcPlayerManager.sanitizeGalleryRate(vlcPlayerManager.getGalleryRate(), isHevcClip);
+        if (btnPlaybackRate != null) {
+            btnPlaybackRate.setEnabled(true);
+        }
+        updatePlaybackRateButton(chosenRate);
+
+        vlcPlayerManager.playGalleryClip(surfaceGallery, playUri, isFront, is4kFront, chosenRate, startSeekPos, new VlcPlayerManager.GalleryListener() {
             @Override
-            public void onPlaying() {
+            public void onPlaying(final boolean seekable, final long totalLengthMs) {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        galleryEnded = false;
+                        currentGalleryDurationMs = totalLengthMs;
                         pbGalleryLoading.setVisibility(View.GONE);
                         btnPlayClip.setText("Pause");
-                        addDiagLog("VLC playing " + (is4kFront ? "front 4K slideshow (0.33x)" : (isFront ? "front 1080p (1.0x)" : "rear 1080p")) + " preview");
+                        if (sbGallerySeek != null) {
+                            sbGallerySeek.setEnabled(true);
+                        }
+                        showGallerySeekOverlay(true);
+                        float activeRate = vlcPlayerManager.getGalleryRate();
+                        updatePlaybackRateButton(activeRate);
+                        addDiagLog("VLC playing " + (isHevcClip ? "front 4K HEVC" : (isFront ? "front 1080p" : "rear 1080p"))
+                                + " (" + activeRate + "x)");
                     }
                 });
             }
@@ -1187,22 +1401,44 @@ public class MainActivity extends Activity {
             }
 
             @Override
-            public void onTimeChanged(final long currentTimeMs, final long totalLengthMs) {
+            public void onProgressChanged(final float position, final long currentTimeMs, final long totalLengthMs, final boolean seekable) {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (selectedClip != null) {
-                            long curSec = currentTimeMs / 1000;
-                            if (totalLengthMs > 0) {
-                                long totSec = totalLengthMs / 1000;
-                                tvClipDetails.setText(String.format("Size: %s | %02d:%02d / %02d:%02d",
-                                        selectedClip.getFormattedSize(),
-                                        curSec / 60, curSec % 60,
-                                        totSec / 60, totSec % 60));
+                        currentGalleryDurationMs = totalLengthMs;
+                        float effectivePos = position;
+                        if (effectivePos <= 0.0f && totalLengthMs > 0 && currentTimeMs > 0) {
+                            effectivePos = Math.min(1.0f, (float) currentTimeMs / (float) totalLengthMs);
+                        }
+                        if (effectivePos >= 0.0f && effectivePos <= 1.0f) {
+                            lastKnownGalleryPosition = effectivePos;
+                        }
+                        if (sbGallerySeek != null) {
+                            if (!sbGallerySeek.isEnabled()) {
+                                sbGallerySeek.setEnabled(true);
+                            }
+                            if (!isUserSeeking && effectivePos >= 0.0f && effectivePos <= 1.0f) {
+                                int prog = Math.min(1000, Math.max(0, Math.round(effectivePos * 1000.0f)));
+                                sbGallerySeek.setProgress(prog);
+                            }
+                        }
+                        if (selectedClip != null && !isUserSeeking) {
+                            if (totalLengthMs > 0 && currentTimeMs >= 0 && currentTimeMs <= totalLengthMs + 5000L) {
+                                long curSec = currentTimeMs / 1000L;
+                                long totSec = totalLengthMs / 1000L;
+                                String timeLabel = String.format(java.util.Locale.US, "%02d:%02d / %02d:%02d",
+                                        curSec / 60, curSec % 60, totSec / 60, totSec % 60);
+                                if (tvSeekPosition != null) {
+                                    tvSeekPosition.setText(timeLabel);
+                                }
+                                tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | " + timeLabel);
                             } else {
-                                tvClipDetails.setText(String.format("Size: %s | %02d:%02d",
-                                        selectedClip.getFormattedSize(),
-                                        curSec / 60, curSec % 60));
+                                int pct = Math.min(100, Math.max(0, Math.round(lastKnownGalleryPosition * 100.0f)));
+                                if (tvSeekPosition != null) {
+                                    tvSeekPosition.setText(pct + "%");
+                                }
+                                tvClipDetails.setText(String.format(java.util.Locale.US, "Size: %s | Pos: %d%% | Time: %s",
+                                        selectedClip.getFormattedSize(), pct, selectedClip.timeStr));
                             }
                         }
                     }
@@ -1214,6 +1450,21 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        galleryEnded = true;
+                        lastKnownGalleryPosition = 1.0f;
+                        if (sbGallerySeek != null && !isUserSeeking) {
+                            sbGallerySeek.setProgress(1000);
+                        }
+                        if (tvSeekPosition != null && !isUserSeeking) {
+                            if (currentGalleryDurationMs > 0) {
+                                long totSec = currentGalleryDurationMs / 1000L;
+                                tvSeekPosition.setText(String.format(java.util.Locale.US, "%02d:%02d / %02d:%02d",
+                                        totSec / 60, totSec % 60, totSec / 60, totSec % 60));
+                            } else {
+                                tvSeekPosition.setText("100%");
+                            }
+                        }
+                        showGallerySeekOverlay(false);
                         btnPlayClip.setText("Replay");
                         addDiagLog("Clip preview finished");
                     }
@@ -1226,6 +1477,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         pbGalleryLoading.setVisibility(View.GONE);
+                        hideGallerySeekOverlay();
                         btnPlayClip.setText("Play Preview");
                         String err = "VLC playback error: " + message;
                         addDiagLog(err);
@@ -1340,8 +1592,8 @@ public class MainActivity extends Activity {
 
     private void showFullLogViewerDialog() {
         android.widget.ScrollView sv = new android.widget.ScrollView(this);
-        TextView tv = new TextView(this);
-        tv.setText(DebugLogger.dumpSystemDiagnostics(this));
+        final TextView tv = new TextView(this);
+        tv.setText("Collecting system diagnostics...");
         tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
         tv.setTextColor(getResources().getColor(R.color.text_primary));
         tv.setTypeface(android.graphics.Typeface.MONOSPACE);
@@ -1359,6 +1611,21 @@ public class MainActivity extends Activity {
             }
         });
         builder.show();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String report = DebugLogger.dumpSystemDiagnostics(MainActivity.this);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!isFinishing()) {
+                            tv.setText(report);
+                        }
+                    }
+                });
+            }
+        }, "FitcamxLogViewer").start();
     }
 
     public void triggerUsbLogExport(final boolean userInitiated) {
@@ -1459,25 +1726,144 @@ public class MainActivity extends Activity {
         builder.show();
     }
 
-    private void exitWithReboot() {
-        DebugLogger.log("EXIT", "User selected Exit & Reboot");
-        Toast.makeText(this, "Restoring Wi-Fi and rebooting head unit...", Toast.LENGTH_SHORT).show();
-        if (vlcPlayerManager != null) vlcPlayerManager.release();
-        if (usbDownloader != null) usbDownloader.cancelDownload();
-        if (cameraClient != null) cameraClient.setRecording(true, null);
+    private final Runnable backgroundSuspendRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isActivityVisible || isExiting || isFinishing()) return;
+            if (usbDownloader != null && usbDownloader.isDownloading()) {
+                // Keep dashcam Wi-Fi alive until active USB clip transfer finishes
+                lifecycleHandler.postDelayed(backgroundSuspendRunnable, 2000L);
+                return;
+            }
+            DebugLogger.log("LIFECYCLE", "Activity remains in background; restoring original Wi-Fi / SoftAP state");
+            if (wifiBridge != null) {
+                wifiBridge.suspendForBackground();
+                suspendedInBackground = true;
+            }
+        }
+    };
 
-        if (wifiBridge != null) {
-            wifiBridge.restoreAndExit();
+    @Override
+    protected void onStart() {
+        super.onStart();
+        isActivityVisible = true;
+        lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
+        if (isExiting) return;
+
+        if (suspendedInBackground) {
+            suspendedInBackground = false;
+            DebugLogger.log("LIFECYCLE", "Activity returned to foreground; reconnecting to dashcam");
+            if (wifiBridge != null) {
+                wifiBridge.connectToDashcam();
+            }
+        } else if (isConnected && layoutLiveMode != null && layoutLiveMode.getVisibility() == View.VISIBLE
+                && liveSurface != null && liveSurface.isValid()) {
+            startLiveStream();
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        isActivityVisible = false;
+        if (isExiting || isFinishing()) return;
+
+        DebugLogger.log("LIFECYCLE", "Activity moved to background; stopping active video decoders");
+        isStartingLive = false;
+        lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
+        if (vlcPlayerManager != null) {
+            vlcPlayerManager.stopLiveStream();
+            vlcPlayerManager.stopGalleryClip();
+        }
+        if (btnPlayClip != null && selectedClip != null) {
+            btnPlayClip.setText("Play Preview");
         }
 
-        // Brief delay to allow network teardown broadcast and flash flush, then reboot
-        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+        // If camera was left in Playback/Gallery mode or recording was paused, resume loop recording BEFORE Wi-Fi suspends
+        boolean inGallery = (layoutGalleryMode != null && layoutGalleryMode.getVisibility() == View.VISIBLE);
+        boolean activeUsbTransfer = (usbDownloader != null && usbDownloader.isDownloading());
+        if (isConnected && cameraClient != null && !activeUsbTransfer && (inGallery || !isRecording)) {
+            cameraClient.ensureRecordingBeforeTeardown(new Runnable() {
+                @Override
+                public void run() {
+                    isRecording = true;
+                    if (!isActivityVisible && !isExiting) {
+                        lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
+                        lifecycleHandler.postDelayed(backgroundSuspendRunnable, 1200L);
+                    }
+                }
+            }, 1000L);
+        } else {
+            lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
+            lifecycleHandler.postDelayed(backgroundSuspendRunnable, 1500L);
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        boolean inGallery = (layoutGalleryMode != null && layoutGalleryMode.getVisibility() == View.VISIBLE);
+        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_HEADSETHOOK) {
+            if (inGallery && btnPlayClip != null) {
+                btnPlayClip.performClick();
+                return true;
+            }
+        } else if (keyCode == KeyEvent.KEYCODE_MEDIA_NEXT || keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS) {
+            if (inGallery && !displayedClips.isEmpty()) {
+                int curIdx = (selectedClip != null) ? displayedClips.indexOf(selectedClip) : -1;
+                int nextIdx;
+                if (keyCode == KeyEvent.KEYCODE_MEDIA_NEXT) {
+                    nextIdx = (curIdx + 1) % displayedClips.size();
+                } else {
+                    nextIdx = (curIdx <= 0) ? (displayedClips.size() - 1) : (curIdx - 1);
+                }
+                selectedClip = displayedClips.get(nextIdx);
+                if (lvClips != null) {
+                    lvClips.setSelection(nextIdx);
+                }
+                tvSelectedClipName.setText(selectedClip.filename);
+                tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Time: " + selectedClip.timeStr);
+                btnDownloadToUsb.setEnabled(true);
+                playGalleryPreview(selectedClip);
+                return true;
+            } else if (!inGallery && hasRearCamera) {
+                cycleViewMode();
+                return true;
+            }
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    private void exitWithReboot() {
+        if (isExiting) return;
+        isExiting = true;
+        lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
+        DebugLogger.log("EXIT", "User selected Exit & Reboot");
+        Toast.makeText(this, "Restoring Wi-Fi and rebooting head unit...", Toast.LENGTH_SHORT).show();
+
+        if (vlcPlayerManager != null) vlcPlayerManager.release();
+        if (usbDownloader != null) usbDownloader.cancelDownload();
+
+        final Runnable finishRebootTeardown = new Runnable() {
             @Override
             public void run() {
-                performHeadUnitReboot();
-                finish();
+                if (wifiBridge != null) {
+                    wifiBridge.restoreAndExit();
+                }
+                lifecycleHandler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        performHeadUnitReboot();
+                        finish();
+                    }
+                }, 750L);
             }
-        }, 750);
+        };
+
+        if (isConnected && cameraClient != null) {
+            cameraClient.ensureRecordingBeforeTeardown(finishRebootTeardown, 1200L);
+        } else {
+            finishRebootTeardown.run();
+        }
     }
 
     private void performHeadUnitReboot() {
@@ -1523,15 +1909,29 @@ public class MainActivity extends Activity {
     }
 
     private void exitAndRestoreProjection() {
+        if (isExiting) return;
+        isExiting = true;
+        lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
+        Toast.makeText(this, "Restoring previous Wi-Fi state...", Toast.LENGTH_SHORT).show();
+
         if (vlcPlayerManager != null) vlcPlayerManager.release();
         if (usbDownloader != null) usbDownloader.cancelDownload();
-        if (cameraClient != null) cameraClient.setRecording(true, null);
 
-        Toast.makeText(this, "Restoring previous Wi-Fi state...", Toast.LENGTH_SHORT).show();
-        if (wifiBridge != null) {
-            wifiBridge.restoreAndExit();
+        final Runnable finishStandardTeardown = new Runnable() {
+            @Override
+            public void run() {
+                if (wifiBridge != null) {
+                    wifiBridge.restoreAndExit();
+                }
+                finish();
+            }
+        };
+
+        if (isConnected && cameraClient != null) {
+            cameraClient.ensureRecordingBeforeTeardown(finishStandardTeardown, 1200L);
+        } else {
+            finishStandardTeardown.run();
         }
-        finish();
     }
 
     @Override
@@ -1542,11 +1942,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        lifecycleHandler.removeCallbacksAndMessages(null);
         if (vlcPlayerManager != null) vlcPlayerManager.release();
-        if (usbDownloader != null) usbDownloader.cancelDownload();
-        if (cameraClient != null) cameraClient.setRecording(true, null);
+        if (usbDownloader != null) usbDownloader.shutdown();
         if (wifiBridge != null) {
             wifiBridge.restoreAndExit();
+            wifiBridge.shutdown();
+        }
+        if (cameraClient != null) {
+            cameraClient.shutdown();
         }
     }
 

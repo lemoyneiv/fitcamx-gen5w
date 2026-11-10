@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -57,7 +59,18 @@ public class CameraClient {
     public CameraClient(String cameraIp) {
         this.cameraIp = cameraIp;
         this.mainHandler = new Handler(Looper.getMainLooper());
-        this.executor = Executors.newFixedThreadPool(3);
+        // Single-thread CGI queue prevents concurrent HTTP command collisions on Novatek's lwIP server
+        this.executor = Executors.newSingleThreadExecutor();
+    }
+
+    private void runAsync(Runnable task) {
+        if (!executor.isShutdown()) {
+            executor.execute(task);
+        }
+    }
+
+    public void shutdown() {
+        executor.shutdownNow();
     }
 
     public void setCameraIp(String ip) {
@@ -112,57 +125,79 @@ public class CameraClient {
 
     public List<String> getCandidateStreamUrls(boolean front) {
         List<String> list = new ArrayList<String>();
-        if (front) {
-            // Priority 1: Novatek standard RTSP live stream variants
-            list.add("rtsp://" + cameraIp + "/xxx.mov");
-            list.add("rtsp://" + cameraIp + "/xxxx.mov");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/xxx.mov");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/xxxx.mov");
-            list.add("rtsp://" + cameraIp + "/live.mov");
-
-            // Priority 2: JieLi RTSP
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/XXX.hd");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/XXX.fhd");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/XXX.sd");
-
-            // Priority 3: iCatch / AIT RTSP
-            list.add("rtsp://" + cameraIp + "/liveRTSP/v1");
-
-            // Priority 4: Allwinner RTSP
-            list.add("rtsp://" + cameraIp + ":8554/ch01");
-
-            // Priority 5: HiSilicon RTSP
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/livestream/1");
-
-            // Priority 6: Novatek HTTP live stream
-            list.add("http://" + cameraIp + ":8192");
-        } else {
-            // Priority 1: Novatek rear stream (switched via cmd=3028&par=1)
-            list.add("rtsp://" + cameraIp + "/xxx.mov");
-            list.add("rtsp://" + cameraIp + "/xxxx.mov");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/xxx.mov");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/xxxx.mov");
-            list.add("rtsp://" + cameraIp + "/live.mov");
-
-            // Priority 2: JieLi rear RTSP
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/rear.hd");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/rear.fhd");
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/rear.sd");
-
-            // Priority 3: iCatch rear
-            list.add("rtsp://" + cameraIp + "/liveRTSP/v2");
-            list.add("rtsp://" + cameraIp + "/liveRTSP/av4");
-
-            // Priority 4: Allwinner rear
-            list.add("rtsp://" + cameraIp + ":8554/ch13");
-
-            // Priority 5: HiSilicon rear
-            list.add("rtsp://" + cameraIp + ":" + RTSP_PORT + "/livestream/2");
-
-            // Priority 6: Novatek HTTP live stream
-            list.add("http://" + cameraIp + ":8192");
+        switch (socType) {
+            case NOVATEK:
+                addNovatekUrls(list);
+                break;
+            case JIELI:
+                addJieLiUrls(list, front);
+                addNovatekUrls(list);
+                break;
+            case ICATCH:
+                addICatchUrls(list, front);
+                addNovatekUrls(list);
+                break;
+            case ALLWINNER:
+                addAllwinnerUrls(list, front);
+                addNovatekUrls(list);
+                break;
+            case HISILICON:
+                addHiSiliconUrls(list, front);
+                addNovatekUrls(list);
+                break;
+            case UNKNOWN:
+            default:
+                addNovatekUrls(list);
+                addJieLiUrls(list, front);
+                addICatchUrls(list, front);
+                addAllwinnerUrls(list, front);
+                addHiSiliconUrls(list, front);
+                break;
         }
         return list;
+    }
+
+    private void addNovatekUrls(List<String> list) {
+        // Note: rtsp://ip/... defaults to TCP port 554 in RFC 2326 / LibVLC; omit duplicate :554 entries
+        addUnique(list, "rtsp://" + cameraIp + "/xxx.mov");
+        addUnique(list, "rtsp://" + cameraIp + "/xxxx.mov");
+        addUnique(list, "rtsp://" + cameraIp + "/live.mov");
+        addUnique(list, "http://" + cameraIp + ":8192");
+    }
+
+    private void addJieLiUrls(List<String> list, boolean front) {
+        if (front) {
+            addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/XXX.hd");
+            addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/XXX.fhd");
+            addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/XXX.sd");
+        } else {
+            addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/rear.hd");
+            addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/rear.fhd");
+            addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/264_pcm_rt/rear.sd");
+        }
+    }
+
+    private void addICatchUrls(List<String> list, boolean front) {
+        if (front) {
+            addUnique(list, "rtsp://" + cameraIp + "/liveRTSP/v1");
+        } else {
+            addUnique(list, "rtsp://" + cameraIp + "/liveRTSP/v2");
+            addUnique(list, "rtsp://" + cameraIp + "/liveRTSP/av4");
+        }
+    }
+
+    private void addAllwinnerUrls(List<String> list, boolean front) {
+        addUnique(list, "rtsp://" + cameraIp + ":8554/" + (front ? "ch01" : "ch13"));
+    }
+
+    private void addHiSiliconUrls(List<String> list, boolean front) {
+        addUnique(list, "rtsp://" + cameraIp + ":" + RTSP_PORT + "/livestream/" + (front ? "1" : "2"));
+    }
+
+    private static void addUnique(List<String> list, String url) {
+        if (!list.contains(url)) {
+            list.add(url);
+        }
     }
 
     /**
@@ -177,7 +212,7 @@ public class CameraClient {
      * 8. Return priority candidates with dynamic URL first
      */
     public void prepareAndStartLiveView(final int viewMode, final Callback<List<String>> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 String modeName = (viewMode == VIEW_FRONT) ? "FRONT" : (viewMode == VIEW_REAR ? "REAR" : "DUAL (BOTH)");
@@ -198,7 +233,7 @@ public class CameraClient {
                         DebugLogger.log("CAM_LIVE", "cmd=2015&par=0 (Stop live) response: " + (r2015stop != null ? r2015stop.trim() : "null"));
                     } catch (Exception ignored) {}
 
-                    Thread.sleep(200);
+                    Thread.sleep(80);
 
                     // 3. Set mode to Video mode (cmd=3001&par=1)
                     try {
@@ -238,7 +273,7 @@ public class CameraClient {
                     }
 
                     // Settle time for RTSP server to start pushing H.264 NAL units
-                    Thread.sleep(300);
+                    Thread.sleep(120);
 
                     // 6. Query dynamic liveview link from camera firmware (cmd=2019)
                     String dynamicUrl = null;
@@ -256,7 +291,7 @@ public class CameraClient {
                     // 7. Resume continuous SD card loop recording (cmd=2001&par=1)
                     // The live RTSP stream runs concurrently with SD card loop recording
                     try {
-                        Thread.sleep(150);
+                        Thread.sleep(80);
                         String rRec = sendCgiCommand("2001", "1");
                         DebugLogger.log("CAM_LIVE", "cmd=2001&par=1 (Resume recording) response: " + (rRec != null ? rRec.trim() : "null"));
                     } catch (Exception e) {
@@ -288,7 +323,7 @@ public class CameraClient {
      * Stop live view streaming encoder on camera
      */
     public void stopLiveView() {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -304,7 +339,7 @@ public class CameraClient {
      * and querying cmd=3015 to access the SD card file table.
      */
     public void fetchClipList(final Callback<List<ClipItem>> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 StringBuilder diagLog = new StringBuilder();
@@ -372,8 +407,8 @@ public class CameraClient {
                         }
                     }
 
-                    // 7. Fallback: JieLi port 8080
-                    if (clips.isEmpty()) {
+                    // 7. Fallback: JieLi port 8080 (only if JieLi or unidentified SoC)
+                    if (clips.isEmpty() && (socType == SocType.JIELI || socType == SocType.UNKNOWN)) {
                         try {
                             String urlJL = "http://" + cameraIp + ":8080/FORWARD_MEDIA_FILES_LIST";
                             String respJL = httpGetDirect(urlJL, 3000);
@@ -402,7 +437,7 @@ public class CameraClient {
      * Start (true) or Stop (false) Recording
      */
     public void setRecording(final boolean start, final Callback<Boolean> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -420,12 +455,54 @@ public class CameraClient {
     }
 
     /**
+     * Synchronously guarantees Video Mode (cmd=3001&par=1) + Resume Recording (cmd=2001&par=1)
+     * have been delivered to the dashcam BEFORE Wi-Fi STA is torn down, bounded by maxWaitMs.
+     */
+    public void ensureRecordingBeforeTeardown(final Runnable onComplete, final long maxWaitMs) {
+        final AtomicBoolean done = new AtomicBoolean(false);
+        final Runnable finishOnce = new Runnable() {
+            @Override
+            public void run() {
+                if (done.compareAndSet(false, true) && onComplete != null) {
+                    onComplete.run();
+                }
+            }
+        };
+
+        mainHandler.postDelayed(finishOnce, Math.max(250L, maxWaitMs));
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String portPart = (httpPort > 0 && httpPort != 80) ? (":" + httpPort) : "";
+                    String base = "http://" + cameraIp + portPart + "/?custom=1&cmd=";
+                    try {
+                        httpGetDirect(base + "3001&par=1", 700);
+                    } catch (Exception ignored) {}
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException ignored) {}
+                    try {
+                        httpGetDirect(base + "2001&par=1", 700);
+                        DebugLogger.log("CAM_EXIT", "Verified dashcam loop recording resumed prior to Wi-Fi teardown");
+                    } catch (Exception e) {
+                        DebugLogger.log("CAM_EXIT", "Pre-teardown recording resume notice: " + e.getMessage());
+                    }
+                } finally {
+                    mainHandler.post(finishOnce);
+                }
+            }
+        }, "FitcamxExitRecGuard").start();
+    }
+
+    /**
      * Take a snapshot photo.
      * Uses cmd=2017 (movie snapshot trigger) if video stream/recording is active,
      * and falls back to cmd=1001 (standard still photo capture).
      */
     public void takeSnapshot(final Callback<Boolean> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -461,7 +538,7 @@ public class CameraClient {
      * Emergency Lock the current clip (flags event recording / locks file to RO directory)
      */
     public void emergencyLock(final Callback<Boolean> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -505,7 +582,7 @@ public class CameraClient {
      * Toggle microphone audio recording (cmd=2007: 1=on, 0=muted)
      */
     public void setAudioEnabled(final boolean enabled, final Callback<Boolean> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -521,26 +598,19 @@ public class CameraClient {
     }
 
     /**
-     * Synchronize dashcam clock to the car's current system time
+     * Synchronize dashcam clock to the car's current system time (cmd=3005 date + cmd=3006 time)
      */
     public void syncCarTime(final Callback<Boolean> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
                     SimpleDateFormat sdfDate = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
                     SimpleDateFormat sdfTime = new SimpleDateFormat("HH:mm:ss", Locale.US);
-                    SimpleDateFormat sdfFull = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
                     Date now = new Date();
 
-                    try {
-                        String r3014 = sendCgiCustom("3014", "str", sdfFull.format(now));
-                        DebugLogger.log("CAM_STATUS", "cmd=3014 Camera Settings & Capabilities: " + (r3014 != null ? r3014.trim() : "null"));
-                    } catch (Exception ignored) {}
-                    try {
-                        sendCgiCustom("3005", "str", sdfDate.format(now));
-                        sendCgiCustom("3006", "str", sdfTime.format(now));
-                    } catch (Exception ignored) {}
+                    sendCgiCustom("3005", "str", sdfDate.format(now));
+                    sendCgiCustom("3006", "str", sdfTime.format(now));
 
                     postSuccess(callback, true);
                 } catch (Exception e) {
@@ -554,7 +624,7 @@ public class CameraClient {
      * Query all camera menu options and active settings (cmd=3014 / cmd=3002)
      */
     public void queryCameraStatus(final Callback<String> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -576,7 +646,7 @@ public class CameraClient {
      * e.g., par=0 for 4K / highest, par=1 for 1080P FHD (H.264), par=2 for 720P
      */
     public void setVideoResolution(final int resolutionIndex, final Callback<Boolean> callback) {
-        executor.execute(new Runnable() {
+        runAsync(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -617,7 +687,8 @@ public class CameraClient {
         }
         urlBuilder.append("/?custom=1&cmd=").append(cmd);
         if (paramVal != null && !paramVal.isEmpty()) {
-            urlBuilder.append("&").append(paramKey).append("=").append(paramVal);
+            String encoded = URLEncoder.encode(paramVal, "UTF-8").replace("+", "%20");
+            urlBuilder.append("&").append(paramKey).append("=").append(encoded);
         }
 
         return httpGetDirect(urlBuilder.toString(), 3500);
@@ -628,8 +699,9 @@ public class CameraClient {
         URL url = new URL(urlString);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");
+        conn.setRequestProperty("Connection", "close");
         conn.setConnectTimeout(timeoutMs);
-        conn.setReadTimeout(timeoutMs + 2000);
+        conn.setReadTimeout(Math.min(timeoutMs + 1500, timeoutMs * 2));
 
         try {
             int code = conn.getResponseCode();

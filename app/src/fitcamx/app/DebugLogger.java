@@ -35,46 +35,44 @@ import java.util.Locale;
 public class DebugLogger {
     private static final String TAG = "FitcamxDebug";
     private static final int MAX_MEMORY_LOGS = 2500;
-    private static final SimpleDateFormat TIME_FMT = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
-    private static final SimpleDateFormat DATE_FMT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
-    private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
+    private static final ThreadLocal<SimpleDateFormat> TIME_FMT = new ThreadLocal<SimpleDateFormat>() {
+        @Override
+        protected SimpleDateFormat initialValue() {
+            return new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
+        }
+    };
 
     private static final LinkedList<String> logBuffer = new LinkedList<String>();
-    private static File internalLogFile = null;
 
     public static synchronized void init(Context context) {
-        if (internalLogFile == null && context != null) {
+        // Reclaim internal /data flash space from legacy versions without writing to eMMC
+        if (context != null) {
             try {
                 File dir = context.getFilesDir();
                 if (dir != null) {
-                    internalLogFile = new File(dir, "fitcamx_runtime.log");
+                    File legacyRuntime = new File(dir, "fitcamx_runtime.log");
+                    if (legacyRuntime.exists()) {
+                        legacyRuntime.delete();
+                    }
+                    File legacyBackup = new File(dir, "fitcamx_debug_log.txt");
+                    if (legacyBackup.exists()) {
+                        legacyBackup.delete();
+                    }
                 }
             } catch (Exception ignored) {}
         }
-        log("LOGGER", "DebugLogger initialized (App: fitcamx-gen5w v0.5.4)");
+        log("LOGGER", "DebugLogger initialized in RAM-only mode (App: fitcamx-gen5w v0.6.0)");
     }
 
-    public static synchronized void log(String tag, String message) {
-        String ts = TIME_FMT.format(new Date());
+    public static void log(String tag, String message) {
+        String ts = TIME_FMT.get().format(new Date());
         String entry = "[" + ts + "] [" + tag + "] " + message;
         Log.i(tag, message);
 
-        logBuffer.add(entry);
-        while (logBuffer.size() > MAX_MEMORY_LOGS) {
-            logBuffer.removeFirst();
-        }
-
-        // Also append directly to local storage file
-        if (internalLogFile != null) {
-            FileOutputStream fos = null;
-            try {
-                fos = new FileOutputStream(internalLogFile, true);
-                fos.write((entry + "\n").getBytes("UTF-8"));
-            } catch (Exception ignored) {
-            } finally {
-                if (fos != null) {
-                    try { fos.close(); } catch (Exception ignored) {}
-                }
+        synchronized (logBuffer) {
+            logBuffer.add(entry);
+            while (logBuffer.size() > MAX_MEMORY_LOGS) {
+                logBuffer.removeFirst();
             }
         }
     }
@@ -86,16 +84,20 @@ public class DebugLogger {
         }
     }
 
-    public static synchronized List<String> getLogs() {
-        return new ArrayList<String>(logBuffer);
+    public static List<String> getLogs() {
+        synchronized (logBuffer) {
+            return new ArrayList<String>(logBuffer);
+        }
     }
 
-    public static synchronized String getLogsAsString() {
-        StringBuilder sb = new StringBuilder();
-        for (String line : logBuffer) {
-            sb.append(line).append("\n");
+    public static String getLogsAsString() {
+        synchronized (logBuffer) {
+            StringBuilder sb = new StringBuilder();
+            for (String line : logBuffer) {
+                sb.append(line).append("\n");
+            }
+            return sb.toString();
         }
-        return sb.toString();
     }
 
     /**
@@ -118,16 +120,19 @@ public class DebugLogger {
             log("DIAG", "--- Probing Host: " + ip + " ---");
             boolean port80Open = testSocket(ip, 80, 500);
             boolean port554Open = testSocket(ip, 554, 500);
-            testSocket(ip, 3333, 500);
+            boolean port3333Open = testSocket(ip, 3333, 500);
 
-            if (port80Open || port554Open) {
+            if (port80Open || port554Open || port3333Open) {
                 foundActiveCamera = true;
-                // HTTP probes on port 80
-                probeHttp(ip, 80, "/");
-                probeHttp(ip, 80, "/?custom=1&cmd=3016");
-                probeHttp(ip, 80, "/?custom=1&cmd=3504");
-                probeHttp(ip, 80, "/?custom=1&cmd=2015&par=1");
-                probeHttp(ip, 80, "/?custom=1&cmd=3015");
+                // Read-only HTTP probes only (never mutate liveview or playback state)
+                if (port80Open) {
+                    probeHttp(ip, 80, "/");
+                    probeHttp(ip, 80, "/?custom=1&cmd=3016");
+                    probeHttp(ip, 80, "/?custom=1&cmd=3504");
+                }
+                if (port3333Open) {
+                    probeHttp(ip, 3333, "/?custom=1&cmd=3504");
+                }
                 break; // Camera found and verified! No need to probe dead fallback subnets.
             }
         }
@@ -209,11 +214,12 @@ public class DebugLogger {
      */
     public static String dumpSystemDiagnostics(Context context) {
         StringBuilder sb = new StringBuilder();
+        SimpleDateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
         sb.append("================================================================================\n");
         sb.append("                       FITCAMX GEN5W DEBUG REPORT                               \n");
         sb.append("================================================================================\n");
-        sb.append("Timestamp:       ").append(DATE_FMT.format(new Date())).append("\n");
-        sb.append("App Version:     0.5.4 (Dalvik DEX KitKat API 19)\n");
+        sb.append("Timestamp:       ").append(dateFmt.format(new Date())).append("\n");
+        sb.append("App Version:     0.6.0 (Dalvik DEX KitKat API 19)\n");
         sb.append("Device Model:    ").append(Build.MODEL).append(" (").append(Build.PRODUCT).append(")\n");
         sb.append("Manufacturer:    ").append(Build.MANUFACTURER).append("\n");
         sb.append("Hardware / Board:").append(Build.HARDWARE).append(" / ").append(Build.BOARD).append("\n");
@@ -357,16 +363,24 @@ public class DebugLogger {
         sb.append("\n================================================================================\n");
         sb.append("                       ANDROID SYSTEM LOGCAT (RECENT)                           \n");
         sb.append("================================================================================\n");
+        Process p = null;
+        BufferedReader lbr = null;
         try {
-            Process p = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-v", "time", "-t", "300"});
-            BufferedReader lbr = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            p = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-v", "time", "-t", "300"});
+            lbr = new BufferedReader(new InputStreamReader(p.getInputStream()));
             String lLine;
             while ((lLine = lbr.readLine()) != null) {
                 sb.append(lLine).append("\n");
             }
-            lbr.close();
         } catch (Throwable t) {
             sb.append("Failed capturing system logcat: ").append(t.getMessage()).append("\n");
+        } finally {
+            if (lbr != null) {
+                try { lbr.close(); } catch (Exception ignored) {}
+            }
+            if (p != null) {
+                try { p.destroy(); } catch (Exception ignored) {}
+            }
         }
 
         sb.append("\n=============================== END OF REPORT =================================\n");
@@ -496,7 +510,7 @@ public class DebugLogger {
 
         String report = dumpSystemDiagnostics(context);
         List<File> savedFiles = new ArrayList<File>();
-        String dateSuffix = FILE_FMT.format(new Date());
+        String dateSuffix = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
 
         log("EXPORT", "Exporting debug log across " + writableCandidates.size() + " writable USB mount points...");
 
@@ -526,16 +540,6 @@ public class DebugLogger {
                     log("EXPORT", "Successfully wrote: " + f3.getAbsolutePath());
                 }
             }
-        }
-
-        // Save internal backup in app private cache alongside successful export
-        if (context != null) {
-            try {
-                File internalBackup = new File(context.getFilesDir(), "fitcamx_debug_log.txt");
-                if (writeFile(internalBackup, report)) {
-                    log("EXPORT", "Saved internal backup to " + internalBackup.getAbsolutePath());
-                }
-            } catch (Exception ignored) {}
         }
 
         if (!savedFiles.isEmpty()) {

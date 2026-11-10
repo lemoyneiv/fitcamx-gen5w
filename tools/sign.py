@@ -210,7 +210,10 @@ def build(mod_dir, dist, key, hmgapi):
     print(f"signed {mod['id']} {mod['version']}: {len(files)} files, uuid {uuid_of(pub)}")
     print(out)
     print(usb)
-    print(*nemesis_usb(out, mod, mod_dir, hmgapi, dist), sep="\n")
+    if os.path.isdir(hmgapi):
+        print(*nemesis_usb(out, mod, mod_dir, hmgapi, dist), sep="\n")
+    else:
+        print(f"HMG-API checkout not found at {hmgapi} (NEMESIS packaging skipped)")
 
 
 if __name__ == "__main__":

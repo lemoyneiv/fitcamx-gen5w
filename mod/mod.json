@@ -1,7 +1,7 @@
 {
   "id": "fitcamx-gen5w",
   "name": "FITCAMX Dashcam",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "hmgapi": ">=1.0.0",
   "authors": ["Antigravity"],
   "license": "AGPL-3.0",
@@ -19,10 +19,11 @@
       "restart": false
     }
   ],
+  "wifi": {
+    "client": true
+  },
   "usb": [
-    "DashcamFootage",
-    "fitcamx",
-    "logs"
+    "DashcamFootage"
   ],
   "provides": {
     "launcher": [
