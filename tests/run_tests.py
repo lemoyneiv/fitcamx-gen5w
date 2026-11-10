@@ -151,7 +151,7 @@ def verify_dex_and_jni():
         f"{len(defined_classes)} DEX classes checked, hazards={super_iface_hazards}",
     )
 
-    disasm = subprocess.check_output([DEXDUMP, "-d", dex_file], text=True)
+    disasm = subprocess.check_output([DEXDUMP, "-d", dex_file], text=True, errors="replace")
     current_cls = None
     fitcamx_missing = set()
     for line in disasm.splitlines():
