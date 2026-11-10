@@ -295,6 +295,27 @@ def verify_operational_invariants():
                 r = subprocess.run([sh_bin, "-n", script_p], capture_output=True, text=True)
                 check(f"POSIX shell syntax valid: {script_rel}", r.returncode == 0, r.stderr.strip())
 
+    # 6. NEMESIS package conformance (04-Packages.md)
+    nem_pkg_path = os.path.join(BASE_DIR, "dist", "fitcamx-gen5w-v0.6.0-nemesis-package.zip")
+    if os.path.isfile(nem_pkg_path):
+        with zipfile.ZipFile(nem_pkg_path) as z:
+            data = z.read("NEMESIS.data").decode("utf-8")
+            check("NEMESIS package descriptor specifies version=1.1", "version=1.1" in data)
+            check("NEMESIS package descriptor specifies type=application", "type=application" in data)
+            m_short = re.search(r'short-desc="([^"]+)"', data)
+            check("NEMESIS package short-desc <= 64 chars", m_short is not None and len(m_short.group(1)) <= 64,
+                  f"len={len(m_short.group(1)) if m_short else 0}")
+            m_detail = re.search(r'detailed-desc="([^"]+)"', data)
+            check("NEMESIS package detailed-desc <= 256 chars", m_detail is not None and len(m_detail.group(1)) <= 256,
+                  f"len={len(m_detail.group(1)) if m_detail else 0}")
+
+    nem_usb_path = os.path.join(BASE_DIR, "dist", "fitcamx-gen5w-v0.6.0-nemesis-usb.zip")
+    if os.path.isfile(nem_usb_path):
+        with zipfile.ZipFile(nem_usb_path) as z:
+            data = z.read("NEMESIS.data").decode("utf-8")
+            check("NEMESIS USB installer descriptor specifies version=1.1", "version=1.1" in data)
+            check("NEMESIS USB installer descriptor specifies type=install", "type=install" in data)
+
 
 def main():
     force_rebuild = "--rebuild" in sys.argv

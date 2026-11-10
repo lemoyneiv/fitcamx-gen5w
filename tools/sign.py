@@ -79,7 +79,8 @@ def nemesis_usb_py(signed, mod, mod_dir, hmgapi, dist):
         return s if len(s) <= n else s[:n - 3].rstrip() + "..."
     name = text(mod.get("name") or mid, 64)
     short = text("HMG-API mod: " + name, 64)
-    detail = text(f"{name} {ver}, a HMG-API mod (needs HMG-API). {mod.get('description', '')}", 256)
+    raw_desc = mod.get('description', '')
+    detail = text(f"{name} {ver} (needs HMG-API). {raw_desc}", 256)
     pv = subprocess.run([sys.executable, os.path.join(hmgapi, "tools", "nemesis-version.py"), ver],
                         cwd=hmgapi, capture_output=True, text=True, check=True).stdout.strip()
     extra_deps = mod.get("depends", "")
@@ -126,7 +127,7 @@ def nemesis_usb_py(signed, mod, mod_dir, hmgapi, dist):
 
     packed = open(store, "rb").read()
     stick_entries = {
-        "NEMESIS.data": (f"[nemesis]\nversion=1.0\ntype=install\npath=packages/{pkg}.zip\n".encode("utf-8"), False),
+        "NEMESIS.data": (f"[nemesis]\nversion=1.1\ntype=install\npath=packages/{pkg}.zip\n".encode("utf-8"), False),
         "README.txt": (fill("install/nemesis/mod/README.txt"), False),
         f"packages/{pkg}.zip": (packed, False),
     }
@@ -154,6 +155,7 @@ def nemesis_usb(signed, mod, mod_dir, hmgapi, dist):
         swap_in_zip(store, "bin/open.sh", lambda _: open_bytes)
     packed = open(store, "rb").read()
     swap_in_zip(out, f"packages/hmgapi.{mod['id']}.zip", lambda _: packed)
+    swap_in_zip(out, "NEMESIS.data", lambda d: d.replace(b"version=1.0", b"version=1.1"))
     return out, store
 
 
