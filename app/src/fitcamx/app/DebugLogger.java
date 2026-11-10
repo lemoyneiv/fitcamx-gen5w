@@ -43,10 +43,25 @@ public class DebugLogger {
     };
 
     private static final LinkedList<String> logBuffer = new LinkedList<String>();
+    private static volatile String appVersion = "0.6.1";
+
+    public static String getAppVersion() {
+        return appVersion;
+    }
 
     public static synchronized void init(Context context) {
         // Reclaim internal /data flash space from legacy versions without writing to eMMC
         if (context != null) {
+            try {
+                android.content.pm.PackageManager pm = context.getPackageManager();
+                if (pm != null) {
+                    android.content.pm.PackageInfo pi = pm.getPackageInfo(context.getPackageName(), 0);
+                    if (pi != null && pi.versionName != null && !pi.versionName.trim().isEmpty()) {
+                        appVersion = pi.versionName.trim();
+                    }
+                }
+            } catch (Throwable ignored) {}
+
             try {
                 File dir = context.getFilesDir();
                 if (dir != null) {
@@ -61,7 +76,7 @@ public class DebugLogger {
                 }
             } catch (Exception ignored) {}
         }
-        log("LOGGER", "DebugLogger initialized in RAM-only mode (App: fitcamx-gen5w v0.6.0)");
+        log("LOGGER", "DebugLogger initialized in RAM-only mode (App: fitcamx-gen5w v" + appVersion + ")");
     }
 
     public static void log(String tag, String message) {
@@ -219,7 +234,7 @@ public class DebugLogger {
         sb.append("                       FITCAMX GEN5W DEBUG REPORT                               \n");
         sb.append("================================================================================\n");
         sb.append("Timestamp:       ").append(dateFmt.format(new Date())).append("\n");
-        sb.append("App Version:     0.6.0 (Dalvik DEX KitKat API 19)\n");
+        sb.append("App Version:     ").append(appVersion).append(" (Dalvik DEX KitKat API 19)\n");
         sb.append("Device Model:    ").append(Build.MODEL).append(" (").append(Build.PRODUCT).append(")\n");
         sb.append("Manufacturer:    ").append(Build.MANUFACTURER).append("\n");
         sb.append("Hardware / Board:").append(Build.HARDWARE).append(" / ").append(Build.BOARD).append("\n");
@@ -411,12 +426,92 @@ public class DebugLogger {
     }
 
     /**
-     * Find all mounted USB drives (strictly external USB media, ignoring internal emulated storage)
+     * Extracts a physical USB slot alias key (e.g. "usb0", "usb1", "udisk0") so FUSE/bind aliases
+     * like /storage/usb0, /mnt/media_rw/usb0, and /mnt/usb0 collapse to a single physical drive.
+     */
+    private static String extractUsbSlotKey(String path) {
+        if (path == null) return "";
+        String norm = path.replace('\\', '/').toLowerCase(Locale.US);
+        while (norm.endsWith("/") && norm.length() > 1) {
+            norm = norm.substring(0, norm.length() - 1);
+        }
+        int slash = norm.lastIndexOf('/');
+        String leaf = (slash >= 0) ? norm.substring(slash + 1) : norm;
+        if (leaf.startsWith("usb") || leaf.startsWith("udisk") || leaf.startsWith("sda") || leaf.startsWith("sdb")) {
+            return "slot:" + leaf;
+        }
+        return norm;
+    }
+
+    private static void addUniqueUsbCandidate(List<File> results, java.util.Set<String> seenKeys, File candidate) {
+        if (candidate == null || !candidate.exists() || !candidate.isDirectory()) return;
+        String canon;
+        try {
+            canon = candidate.getCanonicalPath();
+        } catch (Exception e) {
+            canon = candidate.getAbsolutePath();
+        }
+        String slotKey = extractUsbSlotKey(candidate.getAbsolutePath());
+        if (seenKeys.contains(canon)) return;
+        // Only collapse FUSE/media_rw slot aliases if the preferred earlier candidate is also writable
+        if (slotKey.startsWith("slot:") && seenKeys.contains(slotKey)) {
+            return;
+        }
+        seenKeys.add(canon);
+        if (slotKey.startsWith("slot:") && candidate.canWrite()) {
+            seenKeys.add(slotKey);
+        }
+        results.add(candidate);
+    }
+
+    private static boolean isLikelyExternalUsbMount(String device, String mountPoint, String fsType) {
+        if (mountPoint == null || mountPoint.isEmpty()) return false;
+        String mp = mountPoint.toLowerCase(Locale.US);
+        if (mp.contains("emulated") || mp.contains("/self") || mp.startsWith("/data")
+                || mp.startsWith("/system") || mp.startsWith("/firmware") || mp.startsWith("/persist")
+                || mp.startsWith("/cache") || mp.equals("/mnt/sdcard") || mp.equals("/storage/sdcard0")) {
+            return false;
+        }
+        if (mp.contains("usb") || mp.contains("udisk") || mp.contains("usbotg") || mp.contains("ext_sd")) {
+            return true;
+        }
+        String dev = (device != null) ? device.toLowerCase(Locale.US) : "";
+        boolean usbBlockDev = dev.contains("/vold/") || dev.startsWith("/dev/block/sd") || dev.contains("usb");
+        boolean removableFs = "vfat".equals(fsType) || "exfat".equals(fsType)
+                || "texfat".equals(fsType) || "ntfs".equals(fsType) || "fuseblk".equals(fsType);
+        return (mp.contains("media_rw") || usbBlockDev) && removableFs;
+    }
+
+    /**
+     * Find all mounted USB drives (strictly external USB media, ignoring internal/system storage,
+     * and deduplicating /storage/usbN vs /mnt/media_rw/usbN aliases).
      */
     public static List<File> findUsbMountDirectories() {
         List<File> results = new ArrayList<File>();
+        java.util.Set<String> seenKeys = new java.util.HashSet<String>();
 
-        // 1. Parse /proc/mounts
+        // 1. Check standard public Android Automotive / Gen5W USB mount points FIRST
+        // (/storage/usb0 matches hmgapid and mod/svc/screenshot.sh directly)
+        String[] standardPaths = new String[] {
+            "/storage/usb0",
+            "/storage/usb1",
+            "/storage/usb2",
+            "/mnt/media_rw/usb0",
+            "/mnt/media_rw/usb1",
+            "/mnt/usb0",
+            "/mnt/usb1",
+            "/storage/usbotg",
+            "/storage/udisk",
+            "/storage/udisk0",
+            "/storage/udisk1",
+            "/mnt/udisk",
+            "/storage/ext_sd"
+        };
+        for (String p : standardPaths) {
+            addUniqueUsbCandidate(results, seenKeys, new File(p));
+        }
+
+        // 2. Parse /proc/mounts for any non-standard external USB mount paths
         File mounts = new File("/proc/mounts");
         if (mounts.exists()) {
             BufferedReader br = null;
@@ -425,21 +520,12 @@ public class DebugLogger {
                 String line;
                 while ((line = br.readLine()) != null) {
                     String[] tokens = line.split("\\s+");
-                    if (tokens.length >= 2) {
+                    if (tokens.length >= 3) {
+                        String device = tokens[0];
                         String mountPoint = tokens[1];
-                        String fsType = tokens.length >= 3 ? tokens[2] : "";
-
-                        // Strictly skip internal emulated storage
-                        if (mountPoint.contains("emulated") || mountPoint.contains("self") || mountPoint.startsWith("/data") || mountPoint.startsWith("/storage/emulated")) {
-                            continue;
-                        }
-
-                        if (mountPoint.contains("usb") || mountPoint.contains("udisk") || mountPoint.contains("media_rw") ||
-                            fsType.equals("vfat") || fsType.equals("exfat") || fsType.equals("ntfs")) {
-                            File f = new File(mountPoint);
-                            if (f.exists() && f.isDirectory() && !results.contains(f)) {
-                                results.add(f);
-                            }
+                        String fsType = tokens[2];
+                        if (isLikelyExternalUsbMount(device, mountPoint, fsType)) {
+                            addUniqueUsbCandidate(results, seenKeys, new File(mountPoint));
                         }
                     }
                 }
@@ -448,28 +534,6 @@ public class DebugLogger {
                 if (br != null) {
                     try { br.close(); } catch (Exception ignored) {}
                 }
-            }
-        }
-
-        // 2. Standard fallback list for Gen5W / Android Automotive USB ports
-        String[] standardPaths = new String[] {
-            "/storage/usb0",
-            "/storage/usb1",
-            "/mnt/usb0",
-            "/mnt/usb1",
-            "/storage/usbotg",
-            "/storage/ext_sd",
-            "/mnt/media_rw/usb0",
-            "/mnt/media_rw/usb1",
-            "/storage/udisk",
-            "/storage/udisk0",
-            "/storage/udisk1",
-            "/mnt/udisk"
-        };
-        for (String p : standardPaths) {
-            File f = new File(p);
-            if (f.exists() && f.isDirectory() && !results.contains(f)) {
-                results.add(f);
             }
         }
 

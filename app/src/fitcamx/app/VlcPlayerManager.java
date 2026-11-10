@@ -27,8 +27,7 @@ import java.util.List;
  *    completely bypassing Android 4.4 KitKat's mediaserver / Stagefright (no what=100 SERVER_DIED crashes).
  * 2. Native RTSP-over-TCP client bypasses Gen5W cellular UDP drops.
  * 3. Dynamic Best-Fit Aspect Ratio Scaler: automatically scales 16:9, 4:3, and dual-sensor
- *    streams to fit the viewing area with letterbox/pillarbox and centers them perfectly
- *    (fixes previews being pushed to the right or left edge).
+ *    streams to fit the viewing area with letterbox/pillarbox and centers them perfectly.
  */
 public class VlcPlayerManager {
     private static final String TAG = "VlcPlayerManager";
@@ -64,10 +63,38 @@ public class VlcPlayerManager {
 
     public interface GalleryListener {
         void onPlaying(boolean seekable, long totalLengthMs);
+        void onVideoOutputStarted();
         void onBuffering(float percent);
         void onProgressChanged(float position, long currentTimeMs, long totalLengthMs, boolean seekable);
         void onEndReached();
         void onError(String message);
+    }
+
+    /**
+     * Determines whether a Buffering event should display the gallery loading spinner.
+     * - Before video output (Vout) has started, any buffering < 100% shows the spinner.
+     * - Once video frames are actively rendering (hasVout == true), only show the spinner
+     *   on genuine buffer underruns or seek rebuffers (percent < 25%), suppressing minor
+     *   HTTP cache fluctuations so the spinner never overlays smoothly playing video.
+     */
+    public static boolean shouldShowSpinnerOnBuffering(float percent, boolean hasVout) {
+        if (percent >= 100.0f) {
+            return false;
+        }
+        return !hasVout || percent < 25.0f;
+    }
+
+    /**
+     * Determines whether active playback progress should clear a lingering loading spinner
+     * (guards against MPEG-TS HTTP streams that resume decoding without emitting a final
+     * Buffering(100.0f) event).
+     */
+    public static boolean shouldClearSpinnerOnProgress(boolean spinnerVisible, boolean hasActiveVideo,
+                                                       long lastIncompleteBufferingMs, long nowUptimeMs) {
+        if (!spinnerVisible || !hasActiveVideo) {
+            return false;
+        }
+        return lastIncompleteBufferingMs <= 0L || (nowUptimeMs - lastIncompleteBufferingMs) >= 400L;
     }
 
     /**
@@ -125,8 +152,13 @@ public class VlcPlayerManager {
     private MediaPlayer livePlayer;
     private MediaPlayer galleryPlayer;
 
-    private LiveListener liveListener;
-    private GalleryListener galleryListener;
+    private volatile LiveListener liveListener;
+    private volatile GalleryListener galleryListener;
+    private volatile int liveSessionGen = 0;
+    private volatile int gallerySessionGen = 0;
+    private volatile boolean liveStopNeeded = false;
+    private volatile boolean galleryStopNeeded = false;
+    private volatile boolean galleryOpening = false;
 
     private SurfaceView attachedLiveSurfaceView = null;
     private SurfaceView attachedGallerySurfaceView = null;
@@ -136,6 +168,7 @@ public class VlcPlayerManager {
     private volatile float targetGalleryRate = 1.0f;
     private volatile boolean galleryPaused = false;
     private volatile boolean gallerySeekable = false;
+    private volatile long galleryLengthMs = 0L;
     private volatile float pendingSeekPosition = -1.0f;
 
     public VlcPlayerManager(Context ctx) {
@@ -154,7 +187,6 @@ public class VlcPlayerManager {
                     // Dedicated 4 worker threads for the 4 physical Cortex-A7 CPU cores
                     options.add("--avcodec-threads=4");
                     // Software decoding pipeline: bypass buggy OMX.TCC.avcdec on KitKat
-                    // LibVLC uses built-in ARM NEON SIMD assembly for crisp frames
                     options.add("--avcodec-hw=none");
                     // Fast decoding optimizations (fast IDCT, simplified motion compensation)
                     options.add("--avcodec-fast");
@@ -169,17 +201,12 @@ public class VlcPlayerManager {
                         @Override
                         public void run() {
                             if (released) {
-                                try { createdLive.release(); } catch (Throwable ignored) {}
-                                try { createdGallery.release(); } catch (Throwable ignored) {}
-                                try { createdLib.release(); } catch (Throwable ignored) {}
+                                releaseNativeObjectsAsync(createdLive, createdGallery, createdLib);
                                 return;
                             }
                             libVLC = createdLib;
                             livePlayer = createdLive;
                             galleryPlayer = createdGallery;
-
-                            setupLiveEventListener();
-                            setupGalleryEventListener();
                             initialized = true;
 
                             DebugLogger.log("VLC", "Consolidated LibVLC engine initialized asynchronously (ARM NEON 4-thread software decoder ready)");
@@ -237,9 +264,7 @@ public class VlcPlayerManager {
      *
      * Note: We NEVER call surfaceView.getHolder().setFixedSize(). On Android KitKat,
      * setFixedSize destroys the active GraphicBuffer in SurfaceFlinger, crashing the
-     * native rendering pipeline and turning HEVC frames into gray noise. Android's
-     * Hardware Composer handles scaling the native surface buffer to the View bounds
-     * automatically in hardware at 0% CPU.
+     * native rendering pipeline and turning HEVC frames into gray noise.
      */
     private void attachWithLayoutScaler(final MediaPlayer player, final SurfaceView surfaceView, final boolean isLive) {
         final IVLCVout vout = player.getVLCVout();
@@ -268,14 +293,9 @@ public class VlcPlayerManager {
             }
         });
 
-        // Immediately compute and apply layout bounds without waiting for stream decode callback
         applyVideoLayout(vout, surfaceView, isLive ? liveAspect : galleryAspect);
     }
 
-    /**
-     * Compute exact Best-Fit dimensions inside parent container, update SurfaceView
-     * layout parameters to Gravity.CENTER, and notify LibVLC window size.
-     */
     private void applyVideoLayout(final IVLCVout vout, final SurfaceView surfaceView, double aspect) {
         if (surfaceView == null) return;
         final View parent = (View) surfaceView.getParent();
@@ -297,7 +317,6 @@ public class VlcPlayerManager {
 
         if (aspect <= 0.1) aspect = 16.0 / 9.0;
 
-        // Best-Fit letterbox / pillarbox inside parent
         int targetW = parentW;
         int targetH = (int) Math.round(parentW / aspect);
         if (targetH > parentH) {
@@ -305,7 +324,6 @@ public class VlcPlayerManager {
             targetW = (int) Math.round(parentH * aspect);
         }
 
-        // Align dimensions to even numbers for YUV 4:2:0 hardware surface compatibility
         targetW = targetW & ~1;
         targetH = targetH & ~1;
 
@@ -361,24 +379,29 @@ public class VlcPlayerManager {
     // LIVE STREAM PLAYBACK
     // =========================================================================
 
-    private void setupLiveEventListener() {
+    private void bindLiveEventListener(final int sessionGen, final LiveListener listener) {
         livePlayer.setEventListener(new MediaPlayer.EventListener() {
             @Override
             public void onEvent(MediaPlayer.Event event) {
+                if (sessionGen != liveSessionGen || released || livePlayer == null) {
+                    return;
+                }
                 switch (event.type) {
                     case MediaPlayer.Event.Playing:
                         DebugLogger.log("VLC_LIVE", "Live stream playing (First frame rendered)");
-                        if (liveListener != null) liveListener.onPlaying();
+                        if (listener != null) listener.onPlaying();
                         break;
                     case MediaPlayer.Event.Buffering:
-                        if (liveListener != null) liveListener.onBuffering(event.getBuffering());
+                        if (listener != null) listener.onBuffering(event.getBuffering());
                         break;
                     case MediaPlayer.Event.EncounteredError:
+                        liveStopNeeded = false;
                         DebugLogger.log("VLC_LIVE", "Live stream encountered error");
-                        if (liveListener != null) liveListener.onError("Live stream connection error");
+                        if (listener != null) listener.onError("Live stream connection error");
                         break;
                     case MediaPlayer.Event.Stopped:
-                        if (liveListener != null) liveListener.onStopped();
+                        liveStopNeeded = false;
+                        if (listener != null) listener.onStopped();
                         break;
                 }
             }
@@ -394,11 +417,14 @@ public class VlcPlayerManager {
                     return;
                 }
 
-                liveListener = listener;
-                attachedLiveSurfaceView = surfaceView;
-
                 try {
                     stopLiveStream();
+                    final int myGen = ++liveSessionGen;
+                    liveListener = listener;
+                    attachedLiveSurfaceView = surfaceView;
+                    // Re-binding calls VLCObject.setEventListener, which flushes stale MainLooper
+                    // EventRunnables (such as Event.Stopped from the previous stream) before play().
+                    bindLiveEventListener(myGen, listener);
                     attachWithLayoutScaler(livePlayer, surfaceView, true);
 
                     Uri uri = Uri.parse(streamUrl);
@@ -415,9 +441,11 @@ public class VlcPlayerManager {
                     livePlayer.setMedia(media);
                     media.release();
 
+                    liveStopNeeded = true;
                     DebugLogger.log("VLC_LIVE", "Starting live RTSP/TCP: " + streamUrl);
                     livePlayer.play();
                 } catch (Throwable t) {
+                    liveStopNeeded = false;
                     Log.e(TAG, "startLiveStream error", t);
                     DebugLogger.log("VLC_LIVE", "startLiveStream error: " + t.getMessage());
                     if (listener != null) listener.onError(t.getMessage());
@@ -427,9 +455,13 @@ public class VlcPlayerManager {
     }
 
     public void stopLiveStream() {
+        liveSessionGen++;
+        liveListener = null;
         if (livePlayer != null) {
             try {
-                if (livePlayer.isPlaying()) {
+                // Stop unconditionally when liveStopNeeded is true (covers Opening & Buffering states too)
+                if (liveStopNeeded || livePlayer.isPlaying()) {
+                    liveStopNeeded = false;
                     livePlayer.stop();
                 }
                 IVLCVout vout = livePlayer.getVLCVout();
@@ -440,22 +472,27 @@ public class VlcPlayerManager {
                 Log.w(TAG, "stopLiveStream error: " + t.getMessage());
             }
         }
+        liveStopNeeded = false;
     }
 
     // =========================================================================
     // GALLERY / SD CARD / USB FOOTAGE PLAYBACK
     // =========================================================================
 
-    private void setupGalleryEventListener() {
+    private void bindGalleryEventListener(final int sessionGen, final GalleryListener listener) {
         galleryPlayer.setEventListener(new MediaPlayer.EventListener() {
             @Override
             public void onEvent(MediaPlayer.Event event) {
+                if (sessionGen != gallerySessionGen || released || galleryPlayer == null) {
+                    return;
+                }
                 switch (event.type) {
                     case MediaPlayer.Event.Playing:
+                        galleryOpening = false;
                         galleryPaused = false;
                         gallerySeekable = galleryPlayer.isSeekable();
-                        long playLen = galleryPlayer.getLength();
-                        DebugLogger.log("VLC_GAL", "Gallery clip playing (Length: " + playLen + "ms, Seekable: "
+                        galleryLengthMs = galleryPlayer.getLength();
+                        DebugLogger.log("VLC_GAL", "Gallery clip playing (Length: " + galleryLengthMs + "ms, Seekable: "
                                 + gallerySeekable + ", rate=" + targetGalleryRate + "x)");
                         galleryPlayer.setRate(targetGalleryRate);
                         if (pendingSeekPosition >= 0.0f) {
@@ -465,55 +502,71 @@ public class VlcPlayerManager {
                                 galleryPlayer.setPosition(targetPos);
                             }
                         }
-                        if (galleryListener != null) {
-                            galleryListener.onPlaying(gallerySeekable, playLen);
+                        if (listener != null) {
+                            listener.onPlaying(gallerySeekable, galleryLengthMs);
+                        }
+                        break;
+                    case MediaPlayer.Event.Vout:
+                        if (event.getVoutCount() > 0 && listener != null) {
+                            listener.onVideoOutputStarted();
                         }
                         break;
                     case MediaPlayer.Event.Paused:
                         galleryPaused = true;
                         break;
                     case MediaPlayer.Event.Stopped:
+                        galleryOpening = false;
                         galleryPaused = false;
                         break;
                     case MediaPlayer.Event.Buffering:
-                        if (galleryListener != null) galleryListener.onBuffering(event.getBuffering());
+                        if (listener != null) {
+                            listener.onBuffering(event.getBuffering());
+                        }
                         break;
                     case MediaPlayer.Event.SeekableChanged:
                         gallerySeekable = event.getSeekable();
-                        if (galleryListener != null) {
-                            galleryListener.onProgressChanged(galleryPlayer.getPosition(), galleryPlayer.getTime(),
-                                    galleryPlayer.getLength(), gallerySeekable);
+                        galleryLengthMs = galleryPlayer.getLength();
+                        if (listener != null) {
+                            listener.onProgressChanged(galleryPlayer.getPosition(), galleryPlayer.getTime(),
+                                    galleryLengthMs, gallerySeekable);
                         }
                         break;
                     case MediaPlayer.Event.PositionChanged:
                         gallerySeekable = galleryPlayer.isSeekable();
-                        if (galleryListener != null) {
-                            galleryListener.onProgressChanged(event.getPositionChanged(), galleryPlayer.getTime(),
-                                    galleryPlayer.getLength(), gallerySeekable);
+                        galleryLengthMs = galleryPlayer.getLength();
+                        if (listener != null) {
+                            listener.onProgressChanged(event.getPositionChanged(), galleryPlayer.getTime(),
+                                    galleryLengthMs, gallerySeekable);
                         }
                         break;
                     case MediaPlayer.Event.TimeChanged:
                         gallerySeekable = galleryPlayer.isSeekable();
-                        if (galleryListener != null) {
-                            galleryListener.onProgressChanged(galleryPlayer.getPosition(), event.getTimeChanged(),
-                                    galleryPlayer.getLength(), gallerySeekable);
+                        galleryLengthMs = galleryPlayer.getLength();
+                        if (listener != null) {
+                            listener.onProgressChanged(galleryPlayer.getPosition(), event.getTimeChanged(),
+                                    galleryLengthMs, gallerySeekable);
                         }
                         break;
                     case MediaPlayer.Event.LengthChanged:
-                        if (galleryListener != null) {
-                            galleryListener.onProgressChanged(galleryPlayer.getPosition(), galleryPlayer.getTime(),
-                                    event.getLengthChanged(), gallerySeekable);
+                        galleryLengthMs = event.getLengthChanged();
+                        if (listener != null) {
+                            listener.onProgressChanged(galleryPlayer.getPosition(), galleryPlayer.getTime(),
+                                    galleryLengthMs, gallerySeekable);
                         }
                         break;
                     case MediaPlayer.Event.EndReached:
+                        galleryOpening = false;
+                        galleryStopNeeded = false;
                         galleryPaused = false;
                         DebugLogger.log("VLC_GAL", "Gallery clip reached end");
-                        if (galleryListener != null) galleryListener.onEndReached();
+                        if (listener != null) listener.onEndReached();
                         break;
                     case MediaPlayer.Event.EncounteredError:
+                        galleryOpening = false;
+                        galleryStopNeeded = false;
                         galleryPaused = false;
                         DebugLogger.log("VLC_GAL", "Gallery clip playback error");
-                        if (galleryListener != null) galleryListener.onError("Playback error");
+                        if (listener != null) listener.onError("Playback error");
                         break;
                 }
             }
@@ -551,15 +604,21 @@ public class VlcPlayerManager {
                 }
 
                 final boolean useFront4kProfile = isFront && is4kFront;
-                galleryListener = listener;
-                attachedGallerySurfaceView = surfaceView;
-                targetGalleryRate = sanitizeGalleryRate(initialRate, useFront4kProfile);
-                pendingSeekPosition = startSeekPosition;
-                galleryPaused = false;
-                gallerySeekable = false;
-
                 try {
                     stopGalleryClip();
+
+                    final int myGen = ++gallerySessionGen;
+                    galleryListener = listener;
+                    attachedGallerySurfaceView = surfaceView;
+                    targetGalleryRate = sanitizeGalleryRate(initialRate, useFront4kProfile);
+                    pendingSeekPosition = startSeekPosition;
+                    galleryPaused = false;
+                    gallerySeekable = false;
+                    galleryLengthMs = 0L;
+
+                    // Re-binding flushes VLCObject's MainLooper Handler queue so Event.Stopped from
+                    // the previous clip can never suppress callbacks for this new clip session.
+                    bindGalleryEventListener(myGen, listener);
                     attachWithLayoutScaler(galleryPlayer, surfaceView, false);
 
                     boolean isHttp = playUri.startsWith("http://") || playUri.startsWith("https://");
@@ -588,7 +647,9 @@ public class VlcPlayerManager {
                         }
                         // Decouple stream clock and disable strict TS PCR pacing
                         media.addOption(":no-ts-trust-pcr");
-                        // Keyframe-only decoding (I-frames only) + skip HEVC in-loop deblocking filter
+                        // Keyframe-only decoding (I-frames only) + skip HEVC in-loop deblocking filter.
+                        // Keep FFmpeg's default 4-core frame multithreading (FF_THREAD_FRAME) enabled across
+                        // GOP keyframes (do NOT force thread_type=slice on single-slice Novatek HEVC).
                         media.addOption(":avcodec-skip-frame=3");
                         media.addOption(":avcodec-skiploopfilter=4");
                         media.addOption(":avcodec-hurry-up=1");
@@ -609,10 +670,14 @@ public class VlcPlayerManager {
                     galleryPlayer.setMedia(media);
                     media.release();
 
+                    galleryOpening = true;
+                    galleryStopNeeded = true;
                     DebugLogger.log("VLC_GAL", "Starting gallery preview (" + (useFront4kProfile ? "FRONT 4K" : (isFront ? "FRONT 1080P" : "REAR 1080P")) + "): " + playUri);
                     galleryPlayer.play();
                     galleryPlayer.setRate(targetGalleryRate);
                 } catch (Throwable t) {
+                    galleryOpening = false;
+                    galleryStopNeeded = false;
                     Log.e(TAG, "playGalleryClip error", t);
                     DebugLogger.log("VLC_GAL", "playGalleryClip error: " + t.getMessage());
                     if (listener != null) listener.onError(t.getMessage());
@@ -622,9 +687,14 @@ public class VlcPlayerManager {
     }
 
     public void stopGalleryClip() {
+        gallerySessionGen++;
+        galleryListener = null;
+        galleryOpening = false;
         if (galleryPlayer != null) {
             try {
-                if (galleryPlayer.isPlaying() || galleryPaused) {
+                // Stop unconditionally when galleryStopNeeded is true (covers Opening & Buffering states too)
+                if (galleryStopNeeded || galleryPlayer.isPlaying() || galleryPaused) {
+                    galleryStopNeeded = false;
                     galleryPlayer.stop();
                 }
                 galleryPaused = false;
@@ -637,6 +707,7 @@ public class VlcPlayerManager {
                 Log.w(TAG, "stopGalleryClip error: " + t.getMessage());
             }
         }
+        galleryStopNeeded = false;
     }
 
     public boolean isGalleryPlaying() {
@@ -645,6 +716,10 @@ public class VlcPlayerManager {
 
     public boolean isGalleryPaused() {
         return galleryPaused;
+    }
+
+    public boolean isGalleryOpening() {
+        return galleryOpening;
     }
 
     public boolean isGallerySeekable() {
@@ -661,6 +736,7 @@ public class VlcPlayerManager {
     public void resumeGalleryClip() {
         if (galleryPlayer != null && !galleryPlayer.isPlaying()) {
             galleryPaused = false;
+            galleryStopNeeded = true;
             galleryPlayer.play();
             galleryPlayer.setRate(targetGalleryRate);
         }
@@ -669,7 +745,15 @@ public class VlcPlayerManager {
     public void seekGalleryPosition(float position) {
         if (galleryPlayer != null) {
             float clamped = Math.max(0.0f, Math.min(0.995f, position));
+            if (galleryOpening && !gallerySeekable) {
+                pendingSeekPosition = clamped;
+                DebugLogger.log("VLC_GAL", String.format(java.util.Locale.US,
+                        "Queued pending gallery seek to %.1f%%", clamped * 100.0f));
+                return;
+            }
             try {
+                DebugLogger.log("VLC_GAL", String.format(java.util.Locale.US,
+                        "Seeking gallery clip to %.1f%%", clamped * 100.0f));
                 galleryPlayer.setPosition(clamped);
                 galleryPlayer.setRate(targetGalleryRate);
             } catch (Throwable t) {
@@ -679,7 +763,7 @@ public class VlcPlayerManager {
     }
 
     public long getGalleryLengthMs() {
-        return (galleryPlayer != null) ? galleryPlayer.getLength() : 0L;
+        return galleryLengthMs;
     }
 
     public void setGalleryRate(float rate, boolean isHevc) {
@@ -697,40 +781,74 @@ public class VlcPlayerManager {
     }
 
     // =========================================================================
-    // LIFECYCLE CLEANUP
+    // LIFECYCLE CLEANUP (NON-BLOCKING UI THREAD DETACH + ASYNC NATIVE JOIN)
     // =========================================================================
 
+    private static void releaseNativeObjectsAsync(final MediaPlayer live, final MediaPlayer gallery, final LibVLC vlc) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (live != null) {
+                        try { live.stop(); } catch (Throwable ignored) {}
+                        try { live.release(); } catch (Throwable ignored) {}
+                    }
+                    if (gallery != null) {
+                        try { gallery.stop(); } catch (Throwable ignored) {}
+                        try { gallery.release(); } catch (Throwable ignored) {}
+                    }
+                    if (vlc != null) {
+                        try { vlc.release(); } catch (Throwable ignored) {}
+                    }
+                    DebugLogger.log("VLC", "LibVLC native engine released cleanly on background thread");
+                } catch (Throwable t) {
+                    Log.w(TAG, "Async release warning: " + t.getMessage());
+                }
+            }
+        }, "FitcamxVlcRelease").start();
+    }
+
     public void release() {
+        if (released) return;
         released = true;
+        initialized = false;
+        liveSessionGen++;
+        gallerySessionGen++;
+        liveStopNeeded = false;
+        galleryStopNeeded = false;
+        galleryOpening = false;
+        liveListener = null;
+        galleryListener = null;
         pendingReadyActions.clear();
+
+        final MediaPlayer liveToRelease = livePlayer;
+        final MediaPlayer galleryToRelease = galleryPlayer;
+        final LibVLC vlcToRelease = libVLC;
+        livePlayer = null;
+        galleryPlayer = null;
+        libVLC = null;
+
         try {
-            stopLiveStream();
-            stopGalleryClip();
-
-            if (livePlayer != null) {
-                if (livePlayer.getVLCVout().areViewsAttached()) {
-                    livePlayer.getVLCVout().detachViews();
+            if (liveToRelease != null) {
+                liveToRelease.setEventListener(null);
+                IVLCVout vout = liveToRelease.getVLCVout();
+                if (vout != null && vout.areViewsAttached()) {
+                    vout.detachViews();
                 }
-                livePlayer.release();
-                livePlayer = null;
             }
-
-            if (galleryPlayer != null) {
-                if (galleryPlayer.getVLCVout().areViewsAttached()) {
-                    galleryPlayer.getVLCVout().detachViews();
+            if (galleryToRelease != null) {
+                galleryToRelease.setEventListener(null);
+                IVLCVout vout = galleryToRelease.getVLCVout();
+                if (vout != null && vout.areViewsAttached()) {
+                    vout.detachViews();
                 }
-                galleryPlayer.release();
-                galleryPlayer = null;
             }
-
-            if (libVLC != null) {
-                libVLC.release();
-                libVLC = null;
-            }
-            initialized = false;
-            DebugLogger.log("VLC", "LibVLC engine released cleanly");
         } catch (Throwable t) {
-            Log.w(TAG, "release error: " + t.getMessage());
+            Log.w(TAG, "Surface detach warning during release: " + t.getMessage());
+        }
+
+        if (liveToRelease != null || galleryToRelease != null || vlcToRelease != null) {
+            releaseNativeObjectsAsync(liveToRelease, galleryToRelease, vlcToRelease);
         }
     }
 }

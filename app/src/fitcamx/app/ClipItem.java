@@ -5,14 +5,15 @@ import java.net.URLEncoder;
 import java.util.Locale;
 
 public class ClipItem implements Serializable {
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
-    public final String name;       // e.g. "CARDV/MOVIE/2026_1107_120000_001F.MP4"
+    public final String name;       // e.g. "CARDV/MOVIE/2026_1107_120000_001F.MP4" or "CARDV/PHOTO/2026_001.JPG"
     public final String filename;   // e.g. "2026_1107_120000_001F.MP4"
     public final long sizeBytes;
     public final String timeStr;
     public final boolean isFront;
     public final boolean isLocked;
+    public final boolean isPhoto;
     public Boolean isHevc = null; // null = unprobed, true = HEVC (4K/2K), false = AVC (1080p)
 
     public ClipItem(String rawPath, long sizeBytes, String timeStr, int attr) {
@@ -31,6 +32,7 @@ public class ClipItem implements Serializable {
         this.sizeBytes = sizeBytes;
         this.timeStr = (timeStr != null) ? timeStr.trim() : "";
 
+        this.isPhoto = isPhotoFilename(this.filename);
         this.isFront = !isRearFilename(clean, this.filename);
 
         // FAT Read-Only bit (0x01, e.g. 33 = ARCHIVE|READONLY) or RO / EMR / EVENT folder (including Novatek EMR_E / RO_E) indicates locked footage
@@ -41,6 +43,22 @@ public class ClipItem implements Serializable {
                 || upperPath.contains("/RO_") || upperPath.contains("/EMR_") || upperPath.contains("/EVENT_")
                 || upperPath.startsWith("RO/") || upperPath.startsWith("EMR/") || upperPath.startsWith("EVENT/")
                 || upperPath.startsWith("RO_") || upperPath.startsWith("EMR_") || upperPath.startsWith("EVENT_");
+    }
+
+    public static boolean isPhotoFilename(String fileName) {
+        if (fileName == null || fileName.isEmpty()) return false;
+        String lower = fileName.toLowerCase(Locale.US);
+        return lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png");
+    }
+
+    public static boolean isVideoFilename(String fileName) {
+        if (fileName == null || fileName.isEmpty()) return false;
+        String lower = fileName.toLowerCase(Locale.US);
+        return lower.endsWith(".mp4") || lower.endsWith(".mov") || lower.endsWith(".avi") || lower.endsWith(".ts");
+    }
+
+    public static boolean isSupportedMediaFilename(String fileName) {
+        return isVideoFilename(fileName) || isPhotoFilename(fileName);
     }
 
     /**
@@ -78,6 +96,10 @@ public class ClipItem implements Serializable {
 
     public String getFormattedSize() {
         if (sizeBytes <= 0) return "-";
+        if (sizeBytes < 1024L * 1024L) {
+            long kb = Math.max(1L, Math.round(sizeBytes / 1024.0));
+            return kb + " KB";
+        }
         double mb = sizeBytes / (1024.0 * 1024.0);
         return String.format(Locale.US, "%.1f MB", mb);
     }
@@ -95,7 +117,8 @@ public class ClipItem implements Serializable {
         }
 
         // Novatek / default
-        rawRelPath = name.contains("/") ? name : ("CARDV/MOVIE/" + filename);
+        String defaultDir = isPhoto ? "CARDV/PHOTO/" : "CARDV/MOVIE/";
+        rawRelPath = name.contains("/") ? name : (defaultDir + filename);
         String portPart = (port > 0 && port != 80) ? (":" + port) : "";
         return "http://" + cameraIp + portPart + "/" + encodePathSegments(rawRelPath);
     }

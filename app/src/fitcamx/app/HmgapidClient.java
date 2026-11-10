@@ -115,6 +115,19 @@ public final class HmgapidClient {
         return false;
     }
 
+    /**
+     * Request root framebuffer screenshot capture to attached USB via hmgapid manual service.
+     * Note: hmgapid service-start queues the service execution asynchronously (within <= 1s).
+     */
+    public static boolean requestScreenshot() {
+        int rc = call("service-start", "screenshot");
+        if (rc == 0) {
+            return true;
+        }
+        rc = call("service-restart", "screenshot");
+        return rc == 0;
+    }
+
     private static void u32(ByteArrayOutputStream o, int v) {
         o.write(v & 0xff);
         o.write(v >> 8 & 0xff);
@@ -138,11 +151,18 @@ public final class HmgapidClient {
 
     private static void skipFully(InputStream in, long len) {
         try {
+            byte[] discard = new byte[4096];
             long remaining = len;
             while (remaining > 0) {
                 long skipped = in.skip(remaining);
-                if (skipped <= 0) break;
-                remaining -= skipped;
+                if (skipped > 0) {
+                    remaining -= skipped;
+                } else {
+                    int toRead = (int) Math.min((long) discard.length, remaining);
+                    int read = in.read(discard, 0, toRead);
+                    if (read < 0) break;
+                    remaining -= read;
+                }
             }
         } catch (Throwable ignored) {}
     }

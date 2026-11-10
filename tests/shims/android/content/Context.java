@@ -16,4 +16,12 @@ public abstract class Context {
     public Object getSystemService(String name) {
         return null;
     }
+
+    public android.content.pm.PackageManager getPackageManager() {
+        return null;
+    }
+
+    public String getPackageName() {
+        return "fitcamx.app";
+    }
 }

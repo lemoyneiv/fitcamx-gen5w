@@ -24,6 +24,7 @@ fitcam-dev-releases/
 logs/
 *.log
 fitcamx_debug_log*.txt
+fitcamx_log_*.txt
 
 # IDE / Editor configuration
 .idea/

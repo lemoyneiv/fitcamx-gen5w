@@ -2,7 +2,6 @@ package fitcamx.app;
 
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -12,6 +11,7 @@ import java.net.URL;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class UsbDownloader {
     private static final String TAG = "UsbDownloader";
@@ -20,15 +20,22 @@ public class UsbDownloader {
     public static final String[] USB_MOUNT_POINTS = {
         "/storage/usb0",
         "/storage/usb1",
+        "/storage/usb2",
+        "/mnt/media_rw/usb0",
+        "/mnt/media_rw/usb1",
         "/mnt/usb0",
         "/mnt/usb1",
         "/storage/ext_sd"
     };
 
+    private static final long MIN_HEADROOM_BYTES = 4L * 1024L * 1024L;
+
     private final Handler mainHandler;
     private final ExecutorService executor;
+    private final AtomicBoolean activeTransfer = new AtomicBoolean(false);
     private volatile boolean isCancelled = false;
-    private volatile boolean isDownloading = false;
+    private volatile HttpURLConnection activeConnection = null;
+    private volatile InputStream activeInputStream = null;
 
     public interface DownloadCallback {
         void onProgress(int percent, double speedMbPerSec, long downloadedBytes, long totalBytes);
@@ -42,31 +49,29 @@ public class UsbDownloader {
     }
 
     /**
-     * Locate the first writable USB drive folder
+     * Locate the first writable USB drive folder (creating DashcamFootage if createIfMissing is true).
+     * Pass createIfMissing=false for passive status checks to avoid synchronous FAT32 directory writes.
      */
-    public static File getUsbDestinationFolder() {
-        // First check dynamically discovered mounts
+    public static File getUsbDestinationFolder(boolean createIfMissing) {
         List<File> discovered = DebugLogger.findUsbMountDirectories();
         for (File dir : discovered) {
             if (dir.exists() && dir.canWrite()) {
                 File target = new File(dir, FOLDER_NAME);
-                if (!target.exists()) {
+                if (!target.exists() && createIfMissing) {
                     target.mkdirs();
                 }
                 if (target.exists() && target.canWrite()) {
                     return target;
                 }
-                // Fallback to base dir if subfolder creation failed
                 return dir;
             }
         }
 
-        // Second check static mount points
         for (String mount : USB_MOUNT_POINTS) {
             File dir = new File(mount);
             if (dir.exists() && dir.canWrite()) {
                 File target = new File(dir, FOLDER_NAME);
-                if (!target.exists()) {
+                if (!target.exists() && createIfMissing) {
                     target.mkdirs();
                 }
                 if (target.exists() && target.canWrite()) {
@@ -78,20 +83,39 @@ public class UsbDownloader {
         return null;
     }
 
+    public static File getUsbDestinationFolder() {
+        return getUsbDestinationFolder(true);
+    }
+
     public static boolean isUsbDriveAttached() {
-        return getUsbDestinationFolder() != null;
+        return getUsbDestinationFolder(false) != null;
     }
 
     public void cancelDownload() {
         isCancelled = true;
+        final InputStream in = activeInputStream;
+        final HttpURLConnection conn = activeConnection;
+        if (in != null || conn != null) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (in != null) in.close();
+                    } catch (Exception ignored) {}
+                    try {
+                        if (conn != null) conn.disconnect();
+                    } catch (Exception ignored) {}
+                }
+            }, "FitcamxUsbCancel").start();
+        }
     }
 
     public boolean isDownloading() {
-        return isDownloading;
+        return activeTransfer.get();
     }
 
     public void shutdown() {
-        isCancelled = true;
+        cancelDownload();
         executor.shutdownNow();
     }
 
@@ -105,129 +129,166 @@ public class UsbDownloader {
 
     public void downloadClipToFolder(final ClipItem clip, final String cameraIp, final boolean isJieLi, final int port, final File explicitDestFolder, final DownloadCallback callback) {
         if (executor.isShutdown()) return;
+        if (clip == null) {
+            postError(callback, new Exception("No media item selected"));
+            return;
+        }
+        if (!activeTransfer.compareAndSet(false, true)) {
+            postError(callback, new Exception("Another USB transfer is already in progress"));
+            return;
+        }
+
         isCancelled = false;
-        executor.execute(new Runnable() {
-            @Override
-            public void run() {
-                isDownloading = true;
-                File destFolder = (explicitDestFolder != null) ? explicitDestFolder : getUsbDestinationFolder();
-                if (destFolder == null) {
-                    isDownloading = false;
-                    Exception e = new Exception("No writable USB drive found across checked mount points");
-                    DebugLogger.log("USB_DL", "Download aborted: " + e.getMessage());
-                    postError(callback, e);
-                    return;
-                }
-
-                File outFile = new File(destFolder, clip.filename);
-                File partFile = new File(destFolder, clip.filename + ".part");
-                String httpUrl = clip.getHttpUrl(cameraIp, isJieLi, port);
-                DebugLogger.log("USB_DL", "Starting atomic download: " + httpUrl + " -> " + outFile.getAbsolutePath());
-                HttpURLConnection conn = null;
-                InputStream in = null;
-                FileOutputStream out = null;
-
-                try {
-                    if (partFile.exists()) {
-                        partFile.delete();
+        try {
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    File destFolder = (explicitDestFolder != null) ? explicitDestFolder : getUsbDestinationFolder(true);
+                    if (destFolder == null) {
+                        activeTransfer.set(false);
+                        Exception e = new Exception("No writable USB drive found across checked mount points");
+                        DebugLogger.log("USB_DL", "Download aborted: " + e.getMessage());
+                        postError(callback, e);
+                        return;
                     }
 
-                    URL url = new URL(httpUrl);
-                    conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setRequestProperty("Connection", "close");
-                    conn.setConnectTimeout(5000);
-                    conn.setReadTimeout(12000);
-
-                    int code = conn.getResponseCode();
-                    DebugLogger.log("USB_DL", "HTTP " + code + " for " + httpUrl);
-                    if (code != 200 && code != 206) {
-                        throw new Exception("HTTP server error code: " + code);
+                    long usableSpace = destFolder.getUsableSpace();
+                    if (clip.sizeBytes > 0 && usableSpace > 0 && usableSpace < clip.sizeBytes + MIN_HEADROOM_BYTES) {
+                        activeTransfer.set(false);
+                        long needMb = (clip.sizeBytes + MIN_HEADROOM_BYTES) / (1024L * 1024L);
+                        long freeMb = usableSpace / (1024L * 1024L);
+                        Exception e = new Exception("Insufficient USB space (" + freeMb + " MB free, need " + needMb + " MB)");
+                        DebugLogger.log("USB_DL", "Download aborted: " + e.getMessage());
+                        postError(callback, e);
+                        return;
                     }
 
-                    long totalBytes = conn.getContentLength();
-                    if (totalBytes <= 0) {
-                        totalBytes = clip.sizeBytes;
-                    }
+                    File outFile = new File(destFolder, clip.filename);
+                    File partFile = new File(destFolder, clip.filename + ".part");
+                    String httpUrl = clip.getHttpUrl(cameraIp, isJieLi, port);
+                    DebugLogger.log("USB_DL", "Starting atomic download: " + httpUrl + " -> " + outFile.getAbsolutePath());
+                    HttpURLConnection conn = null;
+                    InputStream in = null;
+                    FileOutputStream out = null;
 
-                    in = conn.getInputStream();
-                    out = new FileOutputStream(partFile);
+                    try {
+                        if (partFile.exists()) {
+                            partFile.delete();
+                        }
 
-                    byte[] buffer = new byte[64 * 1024];
-                    long downloaded = 0;
-                    long startTime = System.currentTimeMillis();
-                    long lastUpdateTime = startTime;
+                        URL url = new URL(httpUrl);
+                        conn = (HttpURLConnection) url.openConnection();
+                        activeConnection = conn;
+                        conn.setRequestMethod("GET");
+                        conn.setRequestProperty("Connection", "close");
+                        conn.setConnectTimeout(5000);
+                        conn.setReadTimeout(12000);
 
-                    int read;
-                    while ((read = in.read(buffer)) != -1) {
+                        int code = conn.getResponseCode();
+                        DebugLogger.log("USB_DL", "HTTP " + code + " for " + httpUrl);
+                        if (code != 200 && code != 206) {
+                            throw new Exception("HTTP server error code: " + code);
+                        }
+
+                        long totalBytes = conn.getContentLength();
+                        if (totalBytes <= 0) {
+                            totalBytes = clip.sizeBytes;
+                        }
+                        if (totalBytes > 0 && usableSpace > 0 && usableSpace < totalBytes + MIN_HEADROOM_BYTES) {
+                            throw new Exception("Insufficient USB space for " + (totalBytes / (1024L * 1024L)) + " MB file");
+                        }
+
+                        in = conn.getInputStream();
+                        activeInputStream = in;
+                        out = new FileOutputStream(partFile);
+
+                        byte[] buffer = new byte[64 * 1024];
+                        long downloaded = 0;
+                        long startTime = System.currentTimeMillis();
+                        long lastUpdateTime = startTime;
+
+                        int read;
+                        while ((read = in.read(buffer)) != -1) {
+                            if (isCancelled) {
+                                throw new Exception("Transfer cancelled");
+                            }
+
+                            out.write(buffer, 0, read);
+                            downloaded += read;
+
+                            long now = System.currentTimeMillis();
+                            if (now - lastUpdateTime >= 250 || (totalBytes > 0 && downloaded == totalBytes)) {
+                                double elapsedSec = Math.max(0.001, (now - startTime) / 1000.0);
+                                double speedMb = (downloaded / (1024.0 * 1024.0)) / elapsedSec;
+                                int percent = (totalBytes > 0) ? (int) Math.min(100L, (downloaded * 100L) / totalBytes) : -1;
+
+                                postProgress(callback, percent, speedMb, downloaded, totalBytes);
+                                lastUpdateTime = now;
+                            }
+                        }
+
                         if (isCancelled) {
-                            throw new Exception("Download cancelled by user");
+                            throw new Exception("Transfer cancelled");
+                        }
+                        if (downloaded <= 0) {
+                            throw new Exception("Received empty response from camera");
+                        }
+                        if (totalBytes > 0 && downloaded < totalBytes) {
+                            throw new Exception("Incomplete download (" + downloaded + " / " + totalBytes + " bytes)");
                         }
 
-                        out.write(buffer, 0, read);
-                        downloaded += read;
+                        out.flush();
+                        try {
+                            out.getFD().sync();
+                        } catch (Exception ignored) {}
+                        out.close();
+                        out = null;
+                        in.close();
+                        in = null;
+                        activeInputStream = null;
+                        conn.disconnect();
+                        conn = null;
+                        activeConnection = null;
 
-                        long now = System.currentTimeMillis();
-                        if (now - lastUpdateTime >= 250 || (totalBytes > 0 && downloaded == totalBytes)) {
-                            double elapsedSec = Math.max(0.001, (now - startTime) / 1000.0);
-                            double speedMb = (downloaded / (1024.0 * 1024.0)) / elapsedSec;
-                            int percent = (totalBytes > 0) ? (int) Math.min(100L, (downloaded * 100L) / totalBytes) : -1;
-
-                            postProgress(callback, percent, speedMb, downloaded, totalBytes);
-                            lastUpdateTime = now;
+                        if (outFile.exists() && !outFile.delete()) {
+                            DebugLogger.log("USB_DL", "Warning: could not remove pre-existing file before rename: " + outFile.getAbsolutePath());
                         }
+                        if (!partFile.renameTo(outFile)) {
+                            throw new Exception("Failed committing temporary file to USB destination");
+                        }
+
+                        DebugLogger.log("USB_DL", "Download SUCCESS: " + outFile.getAbsolutePath() + " (" + outFile.length() + " bytes)");
+                        postComplete(callback, outFile);
+
+                    } catch (Exception e) {
+                        String errMsg = isCancelled ? "Transfer cancelled" : e.getMessage();
+                        DebugLogger.log("USB_DL", "Download ended: " + clip.filename + " -> " + errMsg);
+                        try {
+                            if (out != null) out.close();
+                        } catch (Exception ignored) {}
+                        try {
+                            if (in != null) in.close();
+                        } catch (Exception ignored) {}
+                        try {
+                            if (conn != null) conn.disconnect();
+                        } catch (Exception ignored) {}
+
+                        if (partFile.exists()) {
+                            partFile.delete();
+                        }
+
+                        postError(callback, isCancelled ? new Exception("Transfer cancelled") : e);
+                    } finally {
+                        activeInputStream = null;
+                        activeConnection = null;
+                        activeTransfer.set(false);
                     }
-
-                    if (downloaded <= 0) {
-                        throw new Exception("Received empty response from camera");
-                    }
-                    if (totalBytes > 0 && downloaded < totalBytes) {
-                        throw new Exception("Incomplete download (" + downloaded + " / " + totalBytes + " bytes)");
-                    }
-
-                    out.flush();
-                    try {
-                        out.getFD().sync();
-                    } catch (Exception ignored) {}
-                    out.close();
-                    out = null;
-                    in.close();
-                    in = null;
-                    conn.disconnect();
-                    conn = null;
-
-                    if (outFile.exists() && !outFile.delete()) {
-                        DebugLogger.log("USB_DL", "Warning: could not remove pre-existing file before rename: " + outFile.getAbsolutePath());
-                    }
-                    if (!partFile.renameTo(outFile)) {
-                        throw new Exception("Failed committing temporary file to USB destination");
-                    }
-
-                    DebugLogger.log("USB_DL", "Download SUCCESS: " + outFile.getAbsolutePath() + " (" + outFile.length() + " bytes)");
-                    postComplete(callback, outFile);
-
-                } catch (Exception e) {
-                    DebugLogger.log("USB_DL", "Download FAILED: " + clip.filename + " -> " + e.getMessage(), e);
-                    try {
-                        if (out != null) out.close();
-                    } catch (Exception ignored) {}
-                    try {
-                        if (in != null) in.close();
-                    } catch (Exception ignored) {}
-                    try {
-                        if (conn != null) conn.disconnect();
-                    } catch (Exception ignored) {}
-
-                    if (partFile.exists()) {
-                        partFile.delete();
-                    }
-
-                    postError(callback, e);
-                } finally {
-                    isDownloading = false;
                 }
-            }
-        });
+            });
+        } catch (RuntimeException rex) {
+            activeTransfer.set(false);
+            postError(callback, rex);
+        }
     }
 
     private void postProgress(final DownloadCallback cb, final int percent, final double speedMb, final long current, final long total) {

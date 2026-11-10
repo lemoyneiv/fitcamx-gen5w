@@ -8,18 +8,18 @@
     android:paddingRight="14dp"
     android:background="?android:attr/selectableItemBackground">
 
-    <!-- Camera Tag Badge (Front / Rear) -->
+    <!-- Camera Tag Badge (Front / Rear - Clean colored text, no background box) -->
     <TextView
         android:id="@+id/tv_cam_badge"
-        android:layout_width="54dp"
-        android:layout_height="28dp"
-        android:gravity="center"
-        android:background="@color/bg_button"
+        android:layout_width="48dp"
+        android:layout_height="wrap_content"
+        android:gravity="left|center_vertical"
+        android:background="@android:color/transparent"
         android:text="FRONT"
         android:textColor="@color/accent_blue"
         android:textSize="12sp"
         android:textStyle="bold"
-        android:layout_marginRight="14dp" />
+        android:layout_marginRight="10dp" />
 
     <!-- Name & Timestamp -->
     <LinearLayout
@@ -47,16 +47,17 @@
             android:layout_marginTop="2dp" />
     </LinearLayout>
 
-    <!-- Lock Status Badge (Emergency recording) -->
+    <!-- Type / Lock Status Badge (Clean colored text, no background box) -->
     <TextView
         android:id="@+id/tv_lock_badge"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:background="@android:color/transparent"
         android:text="LOCKED"
-        android:textColor="@color/accent_gold"
-        android:textSize="12sp"
+        android:textColor="@color/accent_red"
+        android:textSize="11sp"
         android:textStyle="bold"
-        android:layout_marginRight="14dp"
+        android:layout_marginRight="12dp"
         android:visibility="gone" />
 
     <!-- File Size -->

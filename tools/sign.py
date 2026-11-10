@@ -79,16 +79,19 @@ def nemesis_usb_py(signed, mod, mod_dir, hmgapi, dist):
         return s if len(s) <= n else s[:n - 3].rstrip() + "..."
     name = text(mod.get("name") or mid, 64)
     short = text("HMG-API mod: " + name, 64)
-    raw_desc = mod.get('description', '')
-    detail = text(f"{name} {ver} (needs HMG-API). {raw_desc}", 256)
+    raw_desc = mod.get("description", "")
+    detail = text(f"{name} {ver}, a HMG-API mod (needs HMG-API). {raw_desc}", 256)
     pv = subprocess.run([sys.executable, os.path.join(hmgapi, "tools", "nemesis-version.py"), ver],
                         cwd=hmgapi, capture_output=True, text=True, check=True).stdout.strip()
     extra_deps = mod.get("depends", "")
     if isinstance(extra_deps, list):
         extra_deps = ",".join(extra_deps)
     needs = "hmgapi@>=1.0" + (("," + extra_deps) if extra_deps else "")
-    dep = subprocess.run([sys.executable, os.path.join(hmgapi, "tools", "nemesis-meta.py"), "depends", pkg, needs],
-                         cwd=hmgapi, capture_output=True, text=True, check=True).stdout.strip()
+    mod_json_path = os.path.join(os.path.abspath(mod_dir), "mod.json")
+    dep = subprocess.run(
+        [sys.executable, os.path.join(hmgapi, "tools", "nemesis-meta.py"), "depends", pkg, needs, "--mod", mod_json_path],
+        cwd=hmgapi, capture_output=True, text=True, check=True
+    ).stdout.strip()
     repl = {
         "ID": mid, "VERSION": ver, "PACKAGE_ID": pkg, "PACKAGE_VERSION": pv,
         "NAME": name, "SHORT_DESC": short, "DETAILED_DESC": detail, "OS": "any", "DEPENDS": dep,

@@ -1,10 +1,10 @@
 # FITCAMX for Gen5W (Hyundai / Kia / Genesis)
 
-[![Platform](https://img.shields.io/badge/Platform-Gen5W%20(Android%204.4.2%20KitKat%20API%2019)-blue.svg)]()
-[![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)]()
-[![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)]()
+![Platform](https://img.shields.io/badge/Platform-Gen5W%20(Android%204.4.2%20KitKat%20API%2019)-blue.svg)
+![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)
+![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v0.6.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v0.6.1-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
 A native, high-performance dashcam viewer and controller application specifically engineered for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" widescreen displays running Android 4.4.2 KitKat API 19).
 
@@ -16,49 +16,51 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 
 The application is specifically engineered for Gen5W 24:9 ultra-widescreen infotainment displays (1920×720 and 2560×720), featuring ergonomic driver-side controls, centered 16:9 aspect-ratio video surfaces, and non-intrusive translucent overlays.
 
-### Live View (Front 4K Stream)
-*RTSP live monitoring with real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
+### Live View (Front, Dual PiP & Rear Streams)
+*RTSP live monitoring with non-disruptive channel switching, real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
 
 ![Live View - Front Camera](docs/screenshots/01_live_front.png)
 
+*Dual-camera Picture-in-Picture (PiP) live stream*
+
 ![Dual Camera View](docs/screenshots/02_live_dual.png)
+
+*Rear camera 1080p live stream*
 
 ![Rear Camera View](docs/screenshots/03_live_rear.png)
 
-### SD Card Footage Gallery & Playback
-*Indexed SD card clip browser, filter clips, 4K HEVC playback with rate controls, translucent scrub bar overlay, and direct USB export.*
+### SD Card Footage & Still Photo Gallery
+*Indexed SD card media browser with `All`, `Front`, `Rear`, `Emergency`, and `Photos` filters, 4K HEVC playback with rate controls, and direct USB export.*
 
-![SD Card Footage Playback](docs/screenshots/05_4K_playback.png)
+![SD Card Footage Playback](docs/screenshots/04_4k_playback.png)
 
-*File picker can be hidden during playback*
+*File picker hidden for expanded playback with translucent scrub bar overlay*
 
-![Hidden File Picker](docs/screenshots/06_hidden_picker.png)
+![Hidden File Picker and Scrub Bar Overlay](docs/screenshots/05_hidden_picker.png)
 
-*USB file transfer in progress*
+*Still Photos filter and in-app snapshot viewer*
 
-![USB File Transfer](docs/screenshots/07_usb_transfer.png)
+![Still Photos Viewer](docs/screenshots/06_still_photos.png)
 
 ---
+
 ## Installation
 
 ### Prerequisites
 - Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
 
 ### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release package: [**`fitcamx-gen5w-v0.6.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.0/fitcamx-gen5w-v0.6.0-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.6.0-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.6.0)).
+1. Download the latest release package: [**`fitcamx-gen5w-v0.6.1-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.1/fitcamx-gen5w-v0.6.1-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.6.1-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.6.1)).
 2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
-   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.6.0.zip`.
+   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.6.1.zip`.
 3. Insert the flash drive into the vehicle's multimedia USB port.
 4. Open the **HMG-API** app on the infotainment screen.
 5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
 6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
 
 ### Method 2: NEMESIS Package Store
-1. Download [**`fitcamx-gen5w-v0.6.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.0/fitcamx-gen5w-v0.6.0-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.6.0-nemesis-package.zip`](dist/fitcamx-gen5w-v0.6.0-nemesis-package.zip)) and copy to your USB drive.
+1. Download [**`fitcamx-gen5w-v0.6.1-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.1/fitcamx-gen5w-v0.6.1-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.6.1-nemesis-package.zip`](dist/fitcamx-gen5w-v0.6.1-nemesis-package.zip)) and copy to your USB drive.
 2. Launch NEMESIS Manager on the head unit and install the package.
-
-> [!NOTE]
-> **No Codec Patch Required:** Unlike generic Android media players, this application bundles its own compiled LibVLC native engine and does **not** require KramerTech's `media.codecs` patch or system modifications.
 
 ---
 
@@ -66,7 +68,7 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 
 - **Embedded LibVLC 3.3.4 Media Engine:**
   - Self-contained software & hardware decoding pipeline (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`).
-  - **Zero external codec dependencies** — operates standalone without requiring KramerTech's `media.codecs` patch or system modifications.
+  - **Zero external codec dependencies** — operates standalone without requiring codec packs or system modifications.
   - Smooth RTSP streaming with sub-second latency for Front, Rear, and Dual camera feeds (`rtsp://192.168.1.254/xxx.mov`).
   - Uninterrupted recording: Live stream monitoring does not pause or interrupt ongoing dashcam recording.
 
@@ -86,12 +88,15 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
   - **Microphone Control:** Toggle in-cabin audio recording with real-time status query verification (`cmd=2007`).
   - **Instant Snapshot:** Capture still photos while video recording is active (`cmd=2017` / `cmd=1001`).
   - **Emergency Lock:** Write-protect current video segments (`cmd=2001&par=2` / `cmd=2011&par=3`).
-  - **Automatic Clock Sync:** Synchronizes dashcam internal RTC clock with the car's system clock (`cmd=3014`) upon connection.
+  - **Automatic Clock Sync:** Synchronizes dashcam internal RTC date and time with the car's system clock (`cmd=3005` + `cmd=3006`) upon connection.
 
-- **SD Card Footage Review & Direct USB Export:**
-  - Fast directory indexing: loads and filters thousands of clips from `CARDV/Movie` and `CARDV/EMR`.
-  - Filter clips by front/rear camera, chronological timestamp, and file size.
-  - Direct SD-to-USB transfer: export selected clips directly from the camera to an attached car USB drive (`/storage/usb0/DashcamFootage/`) with live progress and write speed indicators.
+- **SD Card Footage & Still Photo Review + Direct USB Export:**
+  - Fast directory indexing with session caching: loads and filters clips and snapshots from `CARDV/Movie`, `CARDV/EMR`, and `CARDV/PHOTO`.
+  - Filter by `All`, `Front`, `Rear`, `Emergency` (locked clips), and `Photos` (still snapshots) with in-app still photo previewing.
+  - Direct SD-to-USB transfer: export selected video clips and still photos directly from the camera to an attached car USB drive (`/storage/usb0/DashcamFootage/`) with live progress, write speed indicators, and transfer cancellation.
+
+- **Tap-to-Screenshot to USB:**
+  - Tap the top-left **FITCAMX** logo at any time to save a full PNG screenshot strictly to the attached USB flash drive (`DashcamFootage/fitcamx_screenshot_YYYYMMDD_HHMMSS.png`) with zero internal `/data` flash writes.
 
 - **Intelligent Wi-Fi Handover & Clean State Restoration:**
   - Automatically transitions between the head unit's SoftAP and client (STA) mode to connect to the dashcam's Wi-Fi network.
@@ -192,8 +197,11 @@ fitcamx/
 │       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover state machine
 │       │   ├── UsbDownloader.java       # Direct SD-to-USB chunked download worker
 │       │   ├── HmgapidClient.java       # Root daemon IPC client (LFD1 protocol)
+│       │   ├── ScreenshotHelper.java    # USB-only screenshot capture & color normalizer
 │       │   ├── DebugLogger.java         # Diagnostics collector & on-demand USB exporter
-│       │   └── ClipItem.java            # SD card movie clip metadata model
+│       │   ├── TsHeaderSniffer.java     # MPEG-TS / MP4 codec header sniffer (HEVC vs AVC)
+│       │   ├── XmlListParser.java       # Sanitized Novatek XML/HTML media index parser
+│       │   └── ClipItem.java            # SD card clip & still photo metadata model
 │       └── main/jniLibs/armeabi-v7a/
 │           ├── libvlc.so                # Precompiled LibVLC native ARMv7 binary
 │           ├── libvlcjni.so             # LibVLC JNI binding
@@ -201,7 +209,8 @@ fitcamx/
 ├── mod/
 │   ├── mod.json                    # HMG-API manifest & launcher descriptor
 │   ├── svc/
-│   │   └── reboot.sh               # Root service script for head unit reboot
+│   │   ├── reboot.sh               # Root service script for head unit reboot
+│   │   └── screenshot.sh           # Root service script for USB-only framebuffer capture
 │   └── icons/                      # Head unit launcher icons
 ├── tools/
 │   ├── build_package.py            # Automated build, dexing, alignment & signing pipeline

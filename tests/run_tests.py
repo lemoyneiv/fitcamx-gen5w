@@ -208,9 +208,17 @@ def verify_apk_and_elf():
         "lib/armeabi-v7a/libvlcjni.so",
         "lib/armeabi-v7a/libc++_shared.so",
     }
+    apk_size = os.path.getsize(apk_path)
+    check(
+        "Fitcamx.apk size is deflated below 22 MB to preserve /data eMMC flash",
+        apk_size < 22 * 1024 * 1024,
+        f"{apk_size:,} bytes",
+    )
     with zipfile.ZipFile(apk_path, "r") as z:
         names = set(z.namelist())
         check("APK bundles all 3 required armeabi-v7a native libraries", expected_sos.issubset(names))
+        all_deflated = all(z.getinfo(so_name).compress_type == zipfile.ZIP_DEFLATED for so_name in expected_sos)
+        check("All bundled .so libraries use ZIP_DEFLATED compression inside Fitcamx.apk", all_deflated)
         all_arm32 = True
         for so_name in expected_sos:
             with z.open(so_name) as sf:
@@ -273,9 +281,18 @@ def verify_operational_invariants():
         mod_raw = f.read()
         mod_obj = json.loads(mod_raw)
 
+    mod_ver = mod_obj.get("version", "")
+    mod_id = mod_obj.get("id", "fitcamx-gen5w")
+    check("AndroidManifest.xml versionName matches mod/mod.json version", f'android:versionName="{mod_ver}"' in manifest_txt, f"version={mod_ver}")
     check("mod/mod.json has NO 'media.codecs' dependency", "media.codecs" not in mod_raw and "depends" not in mod_obj)
     check("mod/mod.json declares wifi.client=true and usb=['DashcamFootage']",
           mod_obj.get("wifi", {}).get("client") is True and mod_obj.get("usb") == ["DashcamFootage"])
+    screenshot_svc = next((s for s in mod_obj.get("services", []) if isinstance(s, dict) and s.get("name") == "screenshot"), {})
+    check("mod/mod.json declares manual root screenshot service (svc/screenshot.sh)",
+          screenshot_svc.get("script") == "svc/screenshot.sh"
+          and screenshot_svc.get("user") == "root"
+          and screenshot_svc.get("start") == "manual"
+          and screenshot_svc.get("restart") is False)
 
     # 4. Launcher icons 128x128
     tile_dim = read_png_dimensions(os.path.join(BASE_DIR, "mod", "icons", "tile.png"))
@@ -286,17 +303,38 @@ def verify_operational_invariants():
           tile_dim == (128, 128) and dis_dim == (128, 128) and icons_distinct,
           f"tile={tile_dim}, tile_disabled={dis_dim}")
 
-    # 5. Shell script syntax checks
+    # 5. Shell script syntax & HMG-API mksh check-scripts.sh verification
     sh_bin = shutil.which("sh")
     if sh_bin:
-        for script_rel in ("mod/open.sh", "mod/svc/reboot.sh"):
+        for script_rel in ("mod/open.sh", "mod/svc/reboot.sh", "mod/svc/screenshot.sh"):
             script_p = os.path.join(BASE_DIR, script_rel)
             if os.path.isfile(script_p):
                 r = subprocess.run([sh_bin, "-n", script_p], capture_output=True, text=True)
                 check(f"POSIX shell syntax valid: {script_rel}", r.returncode == 0, r.stderr.strip())
 
-    # 6. NEMESIS package conformance (04-Packages.md)
-    nem_pkg_path = os.path.join(BASE_DIR, "dist", "fitcamx-gen5w-v0.6.0-nemesis-package.zip")
+    for hmg_cand in (
+        os.path.abspath(os.path.join(BASE_DIR, "third_party", "HMG-API")),
+        os.path.abspath(os.path.join(BASE_DIR, "..", "third_party", "HMG-API")),
+        os.path.abspath(os.path.join(BASE_DIR, "..", "..", "HMG-API")),
+    ):
+        chk_script = os.path.join(hmg_cand, "tools", "check-scripts.sh")
+        if os.path.isfile(chk_script) and sh_bin:
+            r_chk = subprocess.run([sh_bin, chk_script, os.path.join(BASE_DIR, "mod")], capture_output=True, text=True)
+            check("HMG-API tools/check-scripts.sh (KitKat mksh/toybox conformance)", r_chk.returncode == 0, r_chk.stdout.strip())
+            break
+
+    # 6. Release archive & NEMESIS package conformance (04-Packages.md)
+    dist_dir = os.path.join(BASE_DIR, "dist")
+    expected_pkgs = [
+        f"{mod_id}-v{mod_ver}.hmgapi.zip",
+        f"{mod_id}-v{mod_ver}-hmgapi-usb.zip",
+        f"{mod_id}-v{mod_ver}-nemesis-package.zip",
+        f"{mod_id}-v{mod_ver}-nemesis-usb.zip",
+    ]
+    missing_pkgs = [fn for fn in expected_pkgs if not os.path.isfile(os.path.join(dist_dir, fn))]
+    check(f"All 4 signed v{mod_ver} release archives present in dist/", len(missing_pkgs) == 0, str(missing_pkgs))
+
+    nem_pkg_path = os.path.join(dist_dir, f"{mod_id}-v{mod_ver}-nemesis-package.zip")
     if os.path.isfile(nem_pkg_path):
         with zipfile.ZipFile(nem_pkg_path) as z:
             data = z.read("NEMESIS.data").decode("utf-8")
@@ -309,12 +347,18 @@ def verify_operational_invariants():
             check("NEMESIS package detailed-desc <= 256 chars", m_detail is not None and len(m_detail.group(1)) <= 256,
                   f"len={len(m_detail.group(1)) if m_detail else 0}")
 
-    nem_usb_path = os.path.join(BASE_DIR, "dist", "fitcamx-gen5w-v0.6.0-nemesis-usb.zip")
+    nem_usb_path = os.path.join(dist_dir, f"{mod_id}-v{mod_ver}-nemesis-usb.zip")
     if os.path.isfile(nem_usb_path):
         with zipfile.ZipFile(nem_usb_path) as z:
             data = z.read("NEMESIS.data").decode("utf-8")
             check("NEMESIS USB installer descriptor specifies version=1.1", "version=1.1" in data)
             check("NEMESIS USB installer descriptor specifies type=install", "type=install" in data)
+
+    vlc_mgr_src = open(os.path.join(BASE_DIR, "app", "src", "fitcamx", "app", "VlcPlayerManager.java"), "r", encoding="utf-8").read()
+    check("VlcPlayerManager preserves 4-core frame-threading on 4K HEVC (no thread_type=slice option)",
+          ':avcodec-options={thread_type=slice}' not in vlc_mgr_src)
+    check("VlcPlayerManager isolates gallery sessions via generation counter (bindGalleryEventListener)",
+          "bindGalleryEventListener(" in vlc_mgr_src and "gallerySessionActive = false" not in vlc_mgr_src)
 
 
 def main():

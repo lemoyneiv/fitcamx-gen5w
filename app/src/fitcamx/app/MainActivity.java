@@ -5,11 +5,14 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.wifi.ScanResult;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
@@ -19,6 +22,7 @@ import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
@@ -28,7 +32,12 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -37,6 +46,7 @@ import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private static final String TAG = "FitcamxMain";
+    private static final int MAX_PHOTO_PREVIEW_BYTES = 24 * 1024 * 1024;
 
     // Wi-Fi and Camera subsystems
     private WifiBridge wifiBridge;
@@ -44,6 +54,8 @@ public class MainActivity extends Activity {
     private UsbDownloader usbDownloader;
 
     // UI Elements - Top bar
+    private View layoutLogoHeader;
+    private TextView tvTitle;
     private TextView tvWifiStatus;
     private Button btnRescan;
     private Button btnTabLive;
@@ -63,6 +75,7 @@ public class MainActivity extends Activity {
     private SurfaceView surfaceLive;
     private Surface liveSurface = null;
     private boolean isStartingLive = false;
+    private int liveRequestGeneration = 0;
     private ProgressBar pbLiveLoading;
     private TextView tvStreamBadge;
     private TextView tvRecBadge;
@@ -87,9 +100,13 @@ public class MainActivity extends Activity {
     private Button btnFilterFront;
     private Button btnFilterRear;
     private Button btnFilterLocked;
+    private Button btnFilterPhotos;
     private TextView tvSelectedClipName;
     private SurfaceView surfaceGallery;
     private Surface gallerySurface = null;
+    private ImageView ivGalleryPhoto;
+    private Bitmap currentPhotoBitmap = null;
+    private volatile int galleryLoadGeneration = 0;
     private ProgressBar pbGalleryLoading;
     private TextView tvClipDetails;
     private TextView tvUsbStatus;
@@ -111,6 +128,9 @@ public class MainActivity extends Activity {
     private boolean suspendedInBackground = false;
     private boolean isUserSeeking = false;
     private boolean galleryEnded = false;
+    private boolean galleryCacheDirty = true;
+    private boolean galleryHasVout = false;
+    private long lastGalleryBufferingMs = 0L;
     private long currentGalleryDurationMs = 0L;
     private boolean currentGalleryClipIsHevc = false;
     private float lastKnownGalleryPosition = 0.0f;
@@ -128,7 +148,7 @@ public class MainActivity extends Activity {
     private String currentDiagDetails = "";
     private final List<ClipItem> allClips = new ArrayList<ClipItem>();
     private final List<ClipItem> displayedClips = new ArrayList<ClipItem>();
-    private int currentFilter = 0; // 0=All, 1=Front, 2=Rear, 3=Locked
+    private int currentFilter = 0; // 0=All, 1=Front, 2=Rear, 3=Locked, 4=Photos
     private ClipAdapter clipAdapter;
     private ClipItem selectedClip = null;
 
@@ -141,7 +161,7 @@ public class MainActivity extends Activity {
         try {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             DebugLogger.init(this);
-            DebugLogger.log("MAIN", "MainActivity created (Gen5W FITCAMX v0.6.0)");
+            DebugLogger.log("MAIN", "MainActivity created (Gen5W FITCAMX v" + DebugLogger.getAppVersion() + ")");
             setContentView(R.layout.activity_main);
             initViews();
             setupListeners();
@@ -166,10 +186,12 @@ public class MainActivity extends Activity {
                 @Override
                 public void onConnected(String cameraIp, String ssid, CameraClient.SocType socType, int httpPort, String diagDetails) {
                     isConnected = true;
+                    galleryCacheDirty = true;
                     currentSsid = ssid;
                     currentDiagDetails = diagDetails;
                     cameraClient.setCameraIp(cameraIp);
                     cameraClient.setSocType(socType, httpPort);
+                    cameraClient.resetSessionState();
 
                     String msg = "Connected: " + ssid + " [" + cameraIp + "]";
                     addDiagLog(msg + " - " + socType.displayName);
@@ -182,17 +204,23 @@ public class MainActivity extends Activity {
                         tvDiagInfo.setText("Camera: " + socType.displayName + " (" + cameraIp + ") | " + diagDetails);
                     }
 
-                    // Start Live stream immediately first on the CGI queue so video appears ASAP
-                    startLiveStream();
-
-                    // Queue settings sync & car clock sync right behind live stream startup
-                    syncCameraSettings();
-                    cameraClient.syncCarTime(null);
+                    if (layoutGalleryMode != null && layoutGalleryMode.getVisibility() == View.VISIBLE) {
+                        loadGalleryClips(true);
+                        cameraClient.syncCarTime(null);
+                    } else {
+                        // Start Live stream immediately first on the CGI queue so video appears ASAP
+                        startLiveStream();
+                        // Queue settings sync & car clock sync right behind live stream startup
+                        syncCameraSettings();
+                        cameraClient.syncCarTime(null);
+                    }
                 }
 
                 @Override
                 public void onDisconnected() {
                     isConnected = false;
+                    isStartingLive = false;
+                    liveRequestGeneration++;
                     addDiagLog("Wi-Fi disconnected");
                     if (tvWifiStatus != null) {
                         tvWifiStatus.setText("Disconnected");
@@ -286,13 +314,16 @@ public class MainActivity extends Activity {
     }
 
     private void initViews() {
+        layoutLogoHeader = findViewById(R.id.layout_logo_header);
+        tvTitle = (TextView) findViewById(R.id.tv_title);
+
         TextView tvAppVersion = (TextView) findViewById(R.id.tv_app_version);
         if (tvAppVersion != null) {
             try {
                 String vName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
                 tvAppVersion.setText("v" + vName);
             } catch (Exception e) {
-                tvAppVersion.setText("v0.6.0");
+                tvAppVersion.setText("v" + DebugLogger.getAppVersion());
             }
         }
 
@@ -316,7 +347,7 @@ public class MainActivity extends Activity {
                 public void surfaceCreated(SurfaceHolder holder) {
                     liveSurface = holder.getSurface();
                     DebugLogger.log("MAIN", "Live Surface created: " + liveSurface);
-                    if (layoutLiveMode.getVisibility() == View.VISIBLE && isConnected) {
+                    if (layoutLiveMode.getVisibility() == View.VISIBLE && isConnected && isActivityVisible && !isExiting) {
                         startLiveStream();
                     }
                 }
@@ -326,6 +357,7 @@ public class MainActivity extends Activity {
                 public void surfaceDestroyed(SurfaceHolder holder) {
                     liveSurface = null;
                     isStartingLive = false;
+                    liveRequestGeneration++;
                     DebugLogger.log("MAIN", "Live Surface destroyed");
                 }
             });
@@ -364,6 +396,7 @@ public class MainActivity extends Activity {
                 }
             });
         }
+        ivGalleryPhoto = (ImageView) findViewById(R.id.iv_gallery_photo);
         lvClips = (ListView) findViewById(R.id.lv_clips);
         tvClipCount = (TextView) findViewById(R.id.tv_clip_count);
         tvEmptyGallery = (TextView) findViewById(R.id.tv_empty_gallery);
@@ -372,6 +405,7 @@ public class MainActivity extends Activity {
         btnFilterFront = (Button) findViewById(R.id.btn_filter_front);
         btnFilterRear = (Button) findViewById(R.id.btn_filter_rear);
         btnFilterLocked = (Button) findViewById(R.id.btn_filter_locked);
+        btnFilterPhotos = (Button) findViewById(R.id.btn_filter_photos);
         tvSelectedClipName = (TextView) findViewById(R.id.tv_selected_clip_name);
         pbGalleryLoading = (ProgressBar) findViewById(R.id.pb_gallery_loading);
         tvClipDetails = (TextView) findViewById(R.id.tv_clip_details);
@@ -390,6 +424,31 @@ public class MainActivity extends Activity {
     }
 
     private void setupListeners() {
+        // Tap FITCAMX logo header at top-left to save a screenshot strictly to attached USB drive
+        View.OnClickListener screenshotClickListener = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ScreenshotHelper.captureToUsb(MainActivity.this, tvTitle, new ScreenshotHelper.CompletionListener() {
+                    @Override
+                    public void onComplete(File savedFile, String errorMessage) {
+                        if (savedFile != null) {
+                            addDiagLog("Screenshot saved to USB: " + savedFile.getName());
+                            if (tvDiagInfo != null) {
+                                tvDiagInfo.setText("Screenshot saved: " + savedFile.getName());
+                            }
+                        } else if (errorMessage != null) {
+                            addDiagLog("Screenshot notice: " + errorMessage);
+                        }
+                    }
+                });
+            }
+        };
+        if (layoutLogoHeader != null) {
+            layoutLogoHeader.setOnClickListener(screenshotClickListener);
+        } else if (tvTitle != null) {
+            tvTitle.setOnClickListener(screenshotClickListener);
+        }
+
         // Manual Rescan / Re-verify
         if (btnRescan != null) {
             btnRescan.setOnClickListener(new View.OnClickListener() {
@@ -470,6 +529,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void onSuccess(Boolean result) {
                         btnSnapshot.setEnabled(true);
+                        galleryCacheDirty = true;
                         addDiagLog("Snapshot photo captured to SD card");
                         Toast.makeText(MainActivity.this, "Snapshot captured to SD card", Toast.LENGTH_SHORT).show();
                     }
@@ -492,6 +552,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void onSuccess(Boolean result) {
                         btnEmergencyLock.setEnabled(true);
+                        galleryCacheDirty = true;
                         addDiagLog("Emergency lock: current clip flagged in RO/Emergency folder");
                         Toast.makeText(MainActivity.this, "Current clip locked to Emergency folder", Toast.LENGTH_LONG).show();
                     }
@@ -533,10 +594,29 @@ public class MainActivity extends Activity {
         btnToggleRecord.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                isRecording = !isRecording;
-                tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
-                btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
-                cameraClient.setRecording(isRecording, null);
+                final boolean targetRecState = !isRecording;
+                btnToggleRecord.setEnabled(false);
+                tvRecBadge.setVisibility(targetRecState ? View.VISIBLE : View.GONE);
+                btnToggleRecord.setText(targetRecState ? "Stop Recording" : "Start Recording");
+                cameraClient.setRecording(targetRecState, new CameraClient.Callback<Boolean>() {
+                    @Override
+                    public void onSuccess(Boolean result) {
+                        btnToggleRecord.setEnabled(true);
+                        isRecording = targetRecState;
+                        galleryCacheDirty = true;
+                        tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+                        btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
+                        addDiagLog(isRecording ? "Loop recording resumed" : "Loop recording paused");
+                    }
+                    @Override
+                    public void onError(Exception error) {
+                        btnToggleRecord.setEnabled(true);
+                        tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+                        btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
+                        addDiagLog("Recording toggle failed: " + error.getMessage());
+                        Toast.makeText(MainActivity.this, "Recording toggle failed: " + error.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                });
             }
         });
 
@@ -566,17 +646,24 @@ public class MainActivity extends Activity {
                     final boolean target1080p = !is1080pMode;
                     final int targetIndex = target1080p ? 1 : (camera4kIndex > 0 ? camera4kIndex : 0);
                     final String modeName = target1080p ? "1080P FHD" : "4K UHD";
+                    btnCameraRes.setEnabled(false);
                     btnCameraRes.setText("Setting " + modeName + "...");
                     cameraClient.setVideoResolution(targetIndex, new CameraClient.Callback<Boolean>() {
                         @Override
                         public void onSuccess(Boolean result) {
+                            btnCameraRes.setEnabled(true);
                             is1080pMode = target1080p;
+                            galleryCacheDirty = true;
                             btnCameraRes.setText("Rec: " + (is1080pMode ? "1080P" : "4K UHD"));
                             addDiagLog("Dashcam resolution set to " + modeName);
                             Toast.makeText(MainActivity.this, "Camera resolution set to " + modeName, Toast.LENGTH_LONG).show();
+                            if (isConnected && layoutLiveMode != null && layoutLiveMode.getVisibility() == View.VISIBLE) {
+                                startLiveStream();
+                            }
                         }
                         @Override
                         public void onError(Exception error) {
+                            btnCameraRes.setEnabled(true);
                             btnCameraRes.setText("Rec: " + (is1080pMode ? "1080P" : "4K UHD"));
                             addDiagLog("Resolution change failed: " + error.getMessage());
                             Toast.makeText(MainActivity.this, "Resolution change: " + error.getMessage(), Toast.LENGTH_SHORT).show();
@@ -590,7 +677,8 @@ public class MainActivity extends Activity {
         btnRefreshGallery.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                loadGalleryClips();
+                galleryCacheDirty = true;
+                loadGalleryClips(true);
             }
         });
 
@@ -634,6 +722,16 @@ public class MainActivity extends Activity {
             });
         }
 
+        // Filter: Still Photos
+        if (btnFilterPhotos != null) {
+            btnFilterPhotos.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    setGalleryFilter(4);
+                }
+            });
+        }
+
         // Gallery Item Selection
         lvClips.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
@@ -642,18 +740,20 @@ public class MainActivity extends Activity {
                     selectedClip = displayedClips.get(position);
                     tvSelectedClipName.setText(selectedClip.filename);
                     tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Time: " + selectedClip.timeStr);
-                    btnDownloadToUsb.setEnabled(true);
+                    checkUsbStatus();
                     playGalleryPreview(selectedClip);
                 }
             }
         });
 
-        // Play / Pause / Replay Selected Clip
+        // Play / Pause / Replay Selected Clip (or Reload Photo)
         btnPlayClip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (selectedClip != null) {
-                    if (galleryEnded) {
+                    if (selectedClip.isPhoto) {
+                        playGalleryPreview(selectedClip);
+                    } else if (galleryEnded) {
                         playGalleryPreview(selectedClip);
                     } else if (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying()) {
                         vlcPlayerManager.pauseGalleryClip();
@@ -667,7 +767,7 @@ public class MainActivity extends Activity {
                         playGalleryPreview(selectedClip);
                     }
                 } else {
-                    Toast.makeText(MainActivity.this, "Select a clip first", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this, "Select an item first", Toast.LENGTH_SHORT).show();
                 }
             }
         });
@@ -677,7 +777,7 @@ public class MainActivity extends Activity {
             frameGalleryContainer.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    if (selectedClip == null || layoutGallerySeekOverlay == null) return;
+                    if (selectedClip == null || selectedClip.isPhoto || layoutGallerySeekOverlay == null) return;
                     if (layoutGallerySeekOverlay.getVisibility() == View.VISIBLE) {
                         if (!isUserSeeking) {
                             hideGallerySeekOverlay();
@@ -697,6 +797,9 @@ public class MainActivity extends Activity {
                 public void onClick(View v) {
                     if (selectedClip == null || vlcPlayerManager == null) {
                         Toast.makeText(MainActivity.this, "Select a clip first", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    if (selectedClip.isPhoto) {
                         return;
                     }
                     float current = vlcPlayerManager.getGalleryRate();
@@ -746,7 +849,7 @@ public class MainActivity extends Activity {
                     if (selectedClip != null && vlcPlayerManager != null) {
                         if (galleryEnded) {
                             startGalleryPreviewAt(selectedClip, targetPos, false);
-                        } else if (vlcPlayerManager.isGallerySeekable()) {
+                        } else if (vlcPlayerManager.isGallerySeekable() || vlcPlayerManager.isGalleryOpening()) {
                             lastKnownGalleryPosition = targetPos;
                             vlcPlayerManager.seekGalleryPosition(targetPos);
                             showGallerySeekOverlay(!vlcPlayerManager.isGalleryPaused());
@@ -762,12 +865,17 @@ public class MainActivity extends Activity {
             });
         }
 
-        // Download to USB Drive
+        // Download to USB Drive (or Cancel active transfer)
         btnDownloadToUsb.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (usbDownloader != null && usbDownloader.isDownloading()) {
+                    usbDownloader.cancelDownload();
+                    Toast.makeText(MainActivity.this, "Cancelling USB transfer...", Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 if (selectedClip == null) {
-                    Toast.makeText(MainActivity.this, "Please select a clip to save", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this, "Please select an item to save", Toast.LENGTH_SHORT).show();
                     return;
                 }
                 startUsbDownload(selectedClip);
@@ -801,12 +909,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void styleFilterButton(Button btn, boolean active) {
+        if (btn == null) return;
+        btn.setBackgroundColor(getResources().getColor(active ? R.color.accent_blue : R.color.bg_button));
+        btn.setTextColor(active ? 0xFFFFFFFF : getResources().getColor(R.color.text_primary));
+    }
+
     private void setGalleryFilter(int filter) {
         currentFilter = filter;
-        if (btnFilterAll != null) btnFilterAll.setBackgroundColor(getResources().getColor(filter == 0 ? R.color.accent_blue : R.color.bg_button));
-        if (btnFilterFront != null) btnFilterFront.setBackgroundColor(getResources().getColor(filter == 1 ? R.color.accent_blue : R.color.bg_button));
-        if (btnFilterRear != null) btnFilterRear.setBackgroundColor(getResources().getColor(filter == 2 ? R.color.accent_blue : R.color.bg_button));
-        if (btnFilterLocked != null) btnFilterLocked.setBackgroundColor(getResources().getColor(filter == 3 ? R.color.accent_blue : R.color.bg_button));
+        styleFilterButton(btnFilterAll, filter == 0);
+        styleFilterButton(btnFilterFront, filter == 1);
+        styleFilterButton(btnFilterRear, filter == 2);
+        styleFilterButton(btnFilterLocked, filter == 3);
+        styleFilterButton(btnFilterPhotos, filter == 4);
         applyFilter();
     }
 
@@ -814,19 +929,34 @@ public class MainActivity extends Activity {
         displayedClips.clear();
         for (ClipItem c : allClips) {
             if (currentFilter == 1) {
-                if (c.isFront) displayedClips.add(c);
+                if (!c.isPhoto && c.isFront) displayedClips.add(c);
             } else if (currentFilter == 2) {
-                if (!c.isFront) displayedClips.add(c);
+                if (!c.isPhoto && !c.isFront) displayedClips.add(c);
             } else if (currentFilter == 3) {
                 if (c.isLocked) displayedClips.add(c);
+            } else if (currentFilter == 4) {
+                if (c.isPhoto) displayedClips.add(c);
             } else {
                 displayedClips.add(c);
             }
         }
         clipAdapter.notifyDataSetChanged();
-        tvClipCount.setText("Clips (" + displayedClips.size() + "/" + allClips.size() + ")");
-        tvEmptyGallery.setVisibility(displayedClips.isEmpty() ? View.VISIBLE : View.GONE);
-        lvClips.setVisibility(displayedClips.isEmpty() ? View.GONE : View.VISIBLE);
+        String countPrefix = (currentFilter == 4) ? "Photos" : "Clips";
+        tvClipCount.setText(countPrefix + " (" + displayedClips.size() + "/" + allClips.size() + ")");
+        if (displayedClips.isEmpty()) {
+            if (currentFilter == 4) {
+                tvEmptyGallery.setText("No still photos found on SD card.\nUse 'Snapshot' in Live View to capture photos.");
+            } else if (currentFilter == 3 && !allClips.isEmpty()) {
+                tvEmptyGallery.setText("No emergency-locked clips found on SD card.");
+            } else {
+                tvEmptyGallery.setText(R.string.no_clips);
+            }
+            tvEmptyGallery.setVisibility(View.VISIBLE);
+            lvClips.setVisibility(View.GONE);
+        } else {
+            tvEmptyGallery.setVisibility(View.GONE);
+            lvClips.setVisibility(View.VISIBLE);
+        }
     }
 
     private void cycleViewMode() {
@@ -929,7 +1059,7 @@ public class MainActivity extends Activity {
                 btnFilterRear.setVisibility(View.GONE);
             }
             if (btnFilterAll != null) {
-                btnFilterAll.setText("All Clips");
+                btnFilterAll.setText("All");
             }
             DebugLogger.log("MAIN", "Single camera configuration active (Front only, rear/dual views disabled)");
         } else {
@@ -962,7 +1092,9 @@ public class MainActivity extends Activity {
 
     private void switchTab(boolean showLive) {
         if (showLive) {
+            galleryLoadGeneration++;
             hideGallerySeekOverlay();
+            clearPhotoPreview();
             btnTabLive.setBackgroundColor(getResources().getColor(R.color.accent_blue));
             btnTabGallery.setBackgroundColor(getResources().getColor(R.color.bg_button));
             layoutLiveMode.setVisibility(View.VISIBLE);
@@ -983,27 +1115,42 @@ public class MainActivity extends Activity {
             }
         } else {
             isStartingLive = false;
+            liveRequestGeneration++;
             btnTabLive.setBackgroundColor(getResources().getColor(R.color.bg_button));
             btnTabGallery.setBackgroundColor(getResources().getColor(R.color.accent_blue));
             layoutLiveMode.setVisibility(View.GONE);
             layoutGalleryMode.setVisibility(View.VISIBLE);
 
-            // Explicitly hide live surface and enable gallery surface to eliminate video bleeding
+            // Explicitly hide live surface and enable gallery view to eliminate video bleeding
             if (surfaceLive != null) {
                 surfaceLive.setVisibility(View.GONE);
             }
-            if (surfaceGallery != null) {
-                surfaceGallery.setVisibility(View.VISIBLE);
+            if (selectedClip != null && selectedClip.isPhoto) {
+                if (surfaceGallery != null) surfaceGallery.setVisibility(View.GONE);
+                if (ivGalleryPhoto != null) ivGalleryPhoto.setVisibility(View.VISIBLE);
+            } else {
+                if (ivGalleryPhoto != null) ivGalleryPhoto.setVisibility(View.GONE);
+                if (surfaceGallery != null) surfaceGallery.setVisibility(View.VISIBLE);
             }
 
             if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
-            loadGalleryClips();
+            loadGalleryClips(false);
             checkUsbStatus();
         }
     }
 
+    private boolean isLiveViewEligible(int expectedGen) {
+        return expectedGen == liveRequestGeneration
+                && isConnected
+                && isActivityVisible
+                && !isExiting
+                && !isFinishing()
+                && layoutLiveMode != null
+                && layoutLiveMode.getVisibility() == View.VISIBLE;
+    }
+
     private void startLiveStream() {
-        if (!isConnected) return;
+        if (!isConnected || !isActivityVisible || isExiting || isFinishing()) return;
         if (layoutLiveMode != null && layoutLiveMode.getVisibility() != View.VISIBLE) {
             return;
         }
@@ -1014,6 +1161,7 @@ public class MainActivity extends Activity {
         }
 
         final int modeToStart = targetViewMode;
+        final int reqGen = ++liveRequestGeneration;
         currentViewMode = modeToStart;
         isStartingLive = true;
         pbLiveLoading.setVisibility(View.VISIBLE);
@@ -1031,6 +1179,12 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!isLiveViewEligible(reqGen)) {
+                            if (reqGen == liveRequestGeneration) {
+                                isStartingLive = false;
+                            }
+                            return;
+                        }
                         isStartingLive = false;
                         isRecording = true;
                         if (tvRecBadge != null) tvRecBadge.setVisibility(View.VISIBLE);
@@ -1043,8 +1197,13 @@ public class MainActivity extends Activity {
                             return;
                         }
 
+                        if (liveSurface == null || !liveSurface.isValid()) {
+                            DebugLogger.log("MAIN", "Deferring VLC attach until Live Surface is created");
+                            return;
+                        }
+
                         if (vlcPlayerManager != null && vlcPlayerManager.isAvailable()) {
-                            tryPlayVlcCandidate(candidates, 0, modeToStart);
+                            tryPlayVlcCandidate(candidates, 0, modeToStart, reqGen);
                         } else {
                             addDiagLog("VLC engine not ready for live stream");
                         }
@@ -1057,6 +1216,12 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!isLiveViewEligible(reqGen)) {
+                            if (reqGen == liveRequestGeneration) {
+                                isStartingLive = false;
+                            }
+                            return;
+                        }
                         isStartingLive = false;
                         Log.w(TAG, "prepareAndStartLiveView warning: " + error.getMessage());
 
@@ -1065,9 +1230,13 @@ public class MainActivity extends Activity {
                             return;
                         }
 
+                        if (liveSurface == null || !liveSurface.isValid()) {
+                            return;
+                        }
+
                         List<String> fallbacks = cameraClient.getCandidateStreamUrls(modeToStart);
                         if (vlcPlayerManager != null && vlcPlayerManager.isAvailable()) {
-                            tryPlayVlcCandidate(fallbacks, 0, modeToStart);
+                            tryPlayVlcCandidate(fallbacks, 0, modeToStart, reqGen);
                         }
                     }
                 });
@@ -1075,7 +1244,10 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void tryPlayVlcCandidate(final List<String> urls, final int index, final int streamMode) {
+    private void tryPlayVlcCandidate(final List<String> urls, final int index, final int streamMode, final int reqGen) {
+        if (!isLiveViewEligible(reqGen) || liveSurface == null || !liveSurface.isValid()) {
+            return;
+        }
         if (urls == null || index >= urls.size()) {
             pbLiveLoading.setVisibility(View.GONE);
             String label = getViewModeLabel(streamMode) + " (NO STREAM)";
@@ -1104,6 +1276,10 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!isLiveViewEligible(reqGen)) {
+                            if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
+                            return;
+                        }
                         activeStreamMode = streamMode;
                         currentViewMode = streamMode;
                         pbLiveLoading.setVisibility(View.GONE);
@@ -1130,6 +1306,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!isLiveViewEligible(reqGen)) return;
                         if (percent < 100.0f) {
                             pbLiveLoading.setVisibility(View.VISIBLE);
                         } else {
@@ -1144,9 +1321,10 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!isLiveViewEligible(reqGen)) return;
                         addDiagLog("VLC Stream failed [" + currentUrl + "]: " + message);
                         DebugLogger.log("PLAYER_ERR", "Candidate " + (index + 1) + " failed: " + message);
-                        tryPlayVlcCandidate(urls, index + 1, streamMode);
+                        tryPlayVlcCandidate(urls, index + 1, streamMode, reqGen);
                     }
                 });
             }
@@ -1156,14 +1334,26 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        pbLiveLoading.setVisibility(View.GONE);
+                        if (reqGen == liveRequestGeneration && pbLiveLoading != null) {
+                            pbLiveLoading.setVisibility(View.GONE);
+                        }
                     }
                 });
             }
         });
     }
 
-    private void loadGalleryClips() {
+    private void loadGalleryClips(boolean forceRefresh) {
+        if (!forceRefresh && !galleryCacheDirty && !allClips.isEmpty()) {
+            applyFilter();
+            String cacheMsg = "SD card ready (" + allClips.size() + " items cached)";
+            if (tvDiagInfo != null) {
+                tvDiagInfo.setText(cacheMsg);
+            }
+            cameraClient.enterPlaybackMode(null);
+            return;
+        }
+
         String queryMsg = "Querying SD card from " + cameraClient.getCameraIp() + "...";
         tvClipCount.setText(queryMsg);
         if (tvDiagInfo != null) {
@@ -1177,10 +1367,11 @@ public class MainActivity extends Activity {
                 if (clips != null) {
                     allClips.addAll(clips);
                 }
+                galleryCacheDirty = false;
                 checkCameraConfiguration();
                 applyFilter();
 
-                String resMsg = "SD card loaded: " + allClips.size() + " clips";
+                String resMsg = "SD card loaded: " + allClips.size() + " items";
                 addDiagLog(resMsg);
                 if (tvDiagInfo != null) {
                     tvDiagInfo.setText(resMsg);
@@ -1243,13 +1434,214 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void clearPhotoPreview() {
+        if (ivGalleryPhoto != null) {
+            ivGalleryPhoto.setImageDrawable(null);
+            ivGalleryPhoto.setVisibility(View.GONE);
+        }
+        if (currentPhotoBitmap != null) {
+            if (!currentPhotoBitmap.isRecycled()) {
+                currentPhotoBitmap.recycle();
+            }
+            currentPhotoBitmap = null;
+        }
+    }
+
+    private static int calculateInSampleSize(BitmapFactory.Options options, int maxWidth, int maxHeight) {
+        int height = options.outHeight;
+        int width = options.outWidth;
+        int inSampleSize = 1;
+        if (height > maxHeight || width > maxWidth) {
+            int halfHeight = height / 2;
+            int halfWidth = width / 2;
+            while ((halfHeight / inSampleSize) >= maxHeight || (halfWidth / inSampleSize) >= maxWidth) {
+                inSampleSize *= 2;
+            }
+        }
+        return Math.max(1, inSampleSize);
+    }
+
+    private static byte[] readPhotoBytes(File localFile, String httpUrl) throws Exception {
+        InputStream in = null;
+        HttpURLConnection conn = null;
+        try {
+            if (localFile != null && localFile.exists() && localFile.length() > 0) {
+                in = new FileInputStream(localFile);
+            } else {
+                conn = (HttpURLConnection) new URL(httpUrl).openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(4000);
+                conn.setReadTimeout(8000);
+                conn.setUseCaches(false);
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    throw new Exception("HTTP " + code);
+                }
+                in = conn.getInputStream();
+            }
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(65536);
+            byte[] buf = new byte[16384];
+            int total = 0;
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                total += n;
+                if (total > MAX_PHOTO_PREVIEW_BYTES) {
+                    throw new Exception("Photo exceeds 24 MB preview limit");
+                }
+                bos.write(buf, 0, n);
+            }
+            return bos.toByteArray();
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Exception ignored) {}
+            }
+            if (conn != null) {
+                try {
+                    conn.disconnect();
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private void showStillPhotoPreview(final ClipItem photo, final int loadGen) {
+        galleryEnded = false;
+        galleryHasVout = false;
+        lastGalleryBufferingMs = 0L;
+        currentGalleryDurationMs = 0L;
+        hideGallerySeekOverlay();
+        if (vlcPlayerManager != null) {
+            vlcPlayerManager.stopGalleryClip();
+        }
+        if (surfaceGallery != null) {
+            surfaceGallery.setVisibility(View.GONE);
+        }
+        clearPhotoPreview();
+        if (ivGalleryPhoto != null) {
+            ivGalleryPhoto.setVisibility(View.VISIBLE);
+        }
+        if (pbGalleryLoading != null) {
+            pbGalleryLoading.setVisibility(View.VISIBLE);
+        }
+        if (btnPlaybackRate != null) {
+            btnPlaybackRate.setEnabled(false);
+            btnPlaybackRate.setText("--");
+        }
+        if (btnPlayClip != null) {
+            btnPlayClip.setText("Photo");
+        }
+
+        File usbFolder = UsbDownloader.getUsbDestinationFolder(false);
+        File candidateLocal = (usbFolder != null) ? new File(usbFolder, photo.filename) : null;
+        File partFile = (usbFolder != null) ? new File(usbFolder, photo.filename + ".part") : null;
+        final File verifiedLocal = (candidateLocal != null && candidateLocal.exists()
+                && candidateLocal.length() > 0 && (partFile == null || !partFile.exists()))
+                ? candidateLocal : null;
+        boolean isJieLi = (cameraClient.getSocType() == CameraClient.SocType.JIELI);
+        final String photoUrl = photo.getHttpUrl(cameraClient.getCameraIp(), isJieLi, cameraClient.getHttpPort());
+
+        addDiagLog("Loading photo " + (verifiedLocal != null ? "from USB: " + verifiedLocal.getName() : "via Wi-Fi: " + photoUrl));
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    byte[] data = readPhotoBytes(verifiedLocal, photoUrl);
+                    if (data == null || data.length == 0) {
+                        throw new Exception("Empty photo payload");
+                    }
+
+                    BitmapFactory.Options boundsOpts = new BitmapFactory.Options();
+                    boundsOpts.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(data, 0, data.length, boundsOpts);
+                    final int origW = boundsOpts.outWidth;
+                    final int origH = boundsOpts.outHeight;
+
+                    BitmapFactory.Options decodeOpts = new BitmapFactory.Options();
+                    decodeOpts.inSampleSize = calculateInSampleSize(boundsOpts, 1920, 1080);
+                    decodeOpts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                    Bitmap decoded;
+                    try {
+                        decoded = BitmapFactory.decodeByteArray(data, 0, data.length, decodeOpts);
+                    } catch (OutOfMemoryError oom) {
+                        decodeOpts.inSampleSize = Math.max(2, decodeOpts.inSampleSize * 2);
+                        decodeOpts.inPreferredConfig = Bitmap.Config.RGB_565;
+                        decoded = BitmapFactory.decodeByteArray(data, 0, data.length, decodeOpts);
+                    }
+                    if (decoded == null) {
+                        throw new Exception("Unsupported image format");
+                    }
+
+                    final Bitmap finalBmp = decoded;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (loadGen != galleryLoadGeneration || selectedClip != photo || isFinishing()) {
+                                finalBmp.recycle();
+                                return;
+                            }
+                            if (pbGalleryLoading != null) {
+                                pbGalleryLoading.setVisibility(View.GONE);
+                            }
+                            if (ivGalleryPhoto != null) {
+                                ivGalleryPhoto.setVisibility(View.VISIBLE);
+                                ivGalleryPhoto.setImageBitmap(finalBmp);
+                            }
+                            if (currentPhotoBitmap != null && currentPhotoBitmap != finalBmp && !currentPhotoBitmap.isRecycled()) {
+                                currentPhotoBitmap.recycle();
+                            }
+                            currentPhotoBitmap = finalBmp;
+                            if (origW > 0 && origH > 0) {
+                                tvClipDetails.setText("Photo: " + origW + "x" + origH + " | Size: "
+                                        + photo.getFormattedSize() + " | Time: " + photo.timeStr);
+                            }
+                            addDiagLog("Displayed still photo: " + photo.filename + " (" + origW + "x" + origH + ")");
+                        }
+                    });
+                } catch (final Exception e) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (loadGen != galleryLoadGeneration || selectedClip != photo || isFinishing()) {
+                                return;
+                            }
+                            if (pbGalleryLoading != null) {
+                                pbGalleryLoading.setVisibility(View.GONE);
+                            }
+                            if (btnPlayClip != null) {
+                                btnPlayClip.setText("Retry Photo");
+                            }
+                            String msg = "Photo preview error: " + e.getMessage();
+                            addDiagLog(msg);
+                            Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+        }, "FitcamxPhotoLoader").start();
+    }
+
     private void playGalleryPreview(final ClipItem clip) {
-        startGalleryPreviewAt(clip, -1.0f, true);
+        if (clip == null) return;
+        final int loadGen = ++galleryLoadGeneration;
+        if (clip.isPhoto) {
+            showStillPhotoPreview(clip, loadGen);
+        } else {
+            startGalleryPreviewAt(clip, -1.0f, true, loadGen);
+        }
     }
 
     private void startGalleryPreviewAt(final ClipItem clip, final float startSeekPos, final boolean resetRate) {
+        startGalleryPreviewAt(clip, startSeekPos, resetRate, ++galleryLoadGeneration);
+    }
+
+    private void startGalleryPreviewAt(final ClipItem clip, final float startSeekPos, final boolean resetRate, final int loadGen) {
         if (clip == null) return;
+        clearPhotoPreview();
         galleryEnded = false;
+        galleryHasVout = false;
+        lastGalleryBufferingMs = 0L;
         currentGalleryDurationMs = 0L;
         lastKnownGalleryPosition = (startSeekPos >= 0.0f) ? startSeekPos : 0.0f;
         if (sbGallerySeek != null) {
@@ -1268,7 +1660,7 @@ public class MainActivity extends Activity {
         if (vlcPlayerManager != null) vlcPlayerManager.stopGalleryClip();
 
         // Check if clip is already completely downloaded on USB drive (verify byte size & absence of .part file)
-        File usbFolder = UsbDownloader.getUsbDestinationFolder();
+        File usbFolder = UsbDownloader.getUsbDestinationFolder(false);
         File localFile = (usbFolder != null) ? new File(usbFolder, clip.filename) : null;
         File partFile = (usbFolder != null) ? new File(usbFolder, clip.filename + ".part") : null;
         final String playUri;
@@ -1307,14 +1699,14 @@ public class MainActivity extends Activity {
 
         // Rear clips are ALWAYS 1080p AVC
         if (!isFront) {
-            startGalleryPlaybackInternal(clip, playUri, false, false, isLocalUsb, startSeekPos, resetRate);
+            startGalleryPlaybackInternal(clip, playUri, false, false, isLocalUsb, startSeekPos, resetRate, loadGen);
             return;
         }
 
         // For Front clips: check cached codec first
         if (clip.isHevc != null) {
             boolean is4kFront = clip.isHevc;
-            startGalleryPlaybackInternal(clip, playUri, true, is4kFront, isLocalUsb, startSeekPos, resetRate);
+            startGalleryPlaybackInternal(clip, playUri, true, is4kFront, isLocalUsb, startSeekPos, resetRate, loadGen);
             return;
         }
 
@@ -1342,8 +1734,8 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (selectedClip == clip) {
-                            startGalleryPlaybackInternal(clip, playUri, true, is4kFront, isLocalUsb, startSeekPos, resetRate);
+                        if (loadGen == galleryLoadGeneration && selectedClip == clip) {
+                            startGalleryPlaybackInternal(clip, playUri, true, is4kFront, isLocalUsb, startSeekPos, resetRate, loadGen);
                         }
                     }
                 });
@@ -1353,7 +1745,7 @@ public class MainActivity extends Activity {
 
     private void startGalleryPlaybackInternal(final ClipItem clip, final String playUri, final boolean isFront,
                                               final boolean is4kFront, final boolean isLocalUsb,
-                                              final float startSeekPos, final boolean resetRate) {
+                                              final float startSeekPos, final boolean resetRate, final int loadGen) {
         final boolean isHevcClip = isFront && is4kFront;
         currentGalleryClipIsHevc = isHevcClip;
         final float chosenRate = resetRate
@@ -1370,6 +1762,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
                         galleryEnded = false;
                         currentGalleryDurationMs = totalLengthMs;
                         pbGalleryLoading.setVisibility(View.GONE);
@@ -1387,14 +1780,32 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onVideoOutputStarted() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
+                        galleryHasVout = true;
+                        lastGalleryBufferingMs = 0L;
+                        pbGalleryLoading.setVisibility(View.GONE);
+                    }
+                });
+            }
+
+            @Override
             public void onBuffering(final float percent) {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (percent < 100.0f) {
-                            pbGalleryLoading.setVisibility(View.VISIBLE);
-                        } else {
+                        if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
+                        if (percent >= 100.0f) {
+                            lastGalleryBufferingMs = 0L;
                             pbGalleryLoading.setVisibility(View.GONE);
+                        } else {
+                            lastGalleryBufferingMs = SystemClock.uptimeMillis();
+                            if (VlcPlayerManager.shouldShowSpinnerOnBuffering(percent, galleryHasVout)) {
+                                pbGalleryLoading.setVisibility(View.VISIBLE);
+                            }
                         }
                     }
                 });
@@ -1405,6 +1816,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
                         currentGalleryDurationMs = totalLengthMs;
                         float effectivePos = position;
                         if (effectivePos <= 0.0f && totalLengthMs > 0 && currentTimeMs > 0) {
@@ -1412,6 +1824,15 @@ public class MainActivity extends Activity {
                         }
                         if (effectivePos >= 0.0f && effectivePos <= 1.0f) {
                             lastKnownGalleryPosition = effectivePos;
+                        }
+                        boolean hasActiveVideo = galleryHasVout || effectivePos > 0.02f || currentTimeMs > 250L;
+                        if (VlcPlayerManager.shouldClearSpinnerOnProgress(
+                                pbGalleryLoading.getVisibility() == View.VISIBLE,
+                                hasActiveVideo,
+                                lastGalleryBufferingMs,
+                                SystemClock.uptimeMillis())) {
+                            lastGalleryBufferingMs = 0L;
+                            pbGalleryLoading.setVisibility(View.GONE);
                         }
                         if (sbGallerySeek != null) {
                             if (!sbGallerySeek.isEnabled()) {
@@ -1450,7 +1871,10 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
                         galleryEnded = true;
+                        lastGalleryBufferingMs = 0L;
+                        pbGalleryLoading.setVisibility(View.GONE);
                         lastKnownGalleryPosition = 1.0f;
                         if (sbGallerySeek != null && !isUserSeeking) {
                             sbGallerySeek.setProgress(1000);
@@ -1476,6 +1900,8 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
+                        lastGalleryBufferingMs = 0L;
                         pbGalleryLoading.setVisibility(View.GONE);
                         hideGallerySeekOverlay();
                         btnPlayClip.setText("Play Preview");
@@ -1490,22 +1916,44 @@ public class MainActivity extends Activity {
     }
 
     private void checkUsbStatus() {
-        File usbDir = UsbDownloader.getUsbDestinationFolder();
+        File usbDir = UsbDownloader.getUsbDestinationFolder(false);
+        boolean downloading = (usbDownloader != null && usbDownloader.isDownloading());
+        if (downloading) {
+            btnDownloadToUsb.setText("Cancel");
+            btnDownloadToUsb.setBackgroundColor(getResources().getColor(R.color.accent_red));
+            btnDownloadToUsb.setEnabled(true);
+        } else {
+            btnDownloadToUsb.setText(R.string.btn_download_usb);
+            btnDownloadToUsb.setBackgroundColor(getResources().getColor(R.color.accent_green));
+        }
+
         if (usbDir != null) {
             tvUsbStatus.setText("USB Drive: Ready (" + usbDir.getAbsolutePath() + ")");
             tvUsbStatus.setTextColor(getResources().getColor(R.color.accent_green));
-            btnDownloadToUsb.setEnabled(true);
+            if (!downloading) {
+                btnDownloadToUsb.setEnabled(true);
+            }
         } else {
             tvUsbStatus.setText("USB Drive: Not detected (insert drive in car USB port)");
             tvUsbStatus.setTextColor(getResources().getColor(R.color.accent_gold));
-            btnDownloadToUsb.setEnabled(false);
+            if (!downloading) {
+                btnDownloadToUsb.setEnabled(false);
+            }
         }
     }
 
     private void startUsbDownload(final ClipItem clip) {
+        if (usbDownloader != null && usbDownloader.isDownloading()) {
+            Toast.makeText(this, "A USB transfer is already in progress", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        pbDownloadProgress.setProgress(0);
         pbDownloadProgress.setVisibility(View.VISIBLE);
+        tvDownloadStats.setText("Starting...");
         tvDownloadStats.setVisibility(View.VISIBLE);
-        btnDownloadToUsb.setEnabled(false);
+        btnDownloadToUsb.setText("Cancel");
+        btnDownloadToUsb.setBackgroundColor(getResources().getColor(R.color.accent_red));
+        btnDownloadToUsb.setEnabled(true);
 
         boolean isJieLi = (cameraClient.getSocType() == CameraClient.SocType.JIELI);
         usbDownloader.downloadClip(clip, cameraClient.getCameraIp(), isJieLi, cameraClient.getHttpPort(), new UsbDownloader.DownloadCallback() {
@@ -1515,7 +1963,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         pbDownloadProgress.setProgress(percent);
-                        tvDownloadStats.setText(String.format("%d%% - %.2f MB/s", percent, speedMbPerSec));
+                        tvDownloadStats.setText(String.format(java.util.Locale.US, "%d%% - %.2f MB/s", percent, speedMbPerSec));
                     }
                 });
             }
@@ -1527,9 +1975,10 @@ public class MainActivity extends Activity {
                     public void run() {
                         pbDownloadProgress.setVisibility(View.GONE);
                         tvDownloadStats.setVisibility(View.GONE);
-                        btnDownloadToUsb.setEnabled(true);
+                        checkUsbStatus();
                         addDiagLog("Saved to USB: " + destinationFile.getName());
-                        Toast.makeText(MainActivity.this, "Clip saved to USB:\n" + destinationFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
+                        String kind = clip.isPhoto ? "Photo" : "Clip";
+                        Toast.makeText(MainActivity.this, kind + " saved to USB:\n" + destinationFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
                     }
                 });
             }
@@ -1541,9 +1990,9 @@ public class MainActivity extends Activity {
                     public void run() {
                         pbDownloadProgress.setVisibility(View.GONE);
                         tvDownloadStats.setVisibility(View.GONE);
-                        btnDownloadToUsb.setEnabled(true);
-                        addDiagLog("USB download error: " + error.getMessage());
-                        Toast.makeText(MainActivity.this, "USB Download failed: " + error.getMessage(), Toast.LENGTH_LONG).show();
+                        checkUsbStatus();
+                        addDiagLog("USB transfer notice: " + error.getMessage());
+                        Toast.makeText(MainActivity.this, "USB Transfer: " + error.getMessage(), Toast.LENGTH_LONG).show();
                     }
                 });
             }
@@ -1770,12 +2219,13 @@ public class MainActivity extends Activity {
 
         DebugLogger.log("LIFECYCLE", "Activity moved to background; stopping active video decoders");
         isStartingLive = false;
+        liveRequestGeneration++;
         lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
         if (vlcPlayerManager != null) {
             vlcPlayerManager.stopLiveStream();
             vlcPlayerManager.stopGalleryClip();
         }
-        if (btnPlayClip != null && selectedClip != null) {
+        if (btnPlayClip != null && selectedClip != null && !selectedClip.isPhoto) {
             btnPlayClip.setText("Play Preview");
         }
 
@@ -1822,7 +2272,7 @@ public class MainActivity extends Activity {
                 }
                 tvSelectedClipName.setText(selectedClip.filename);
                 tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Time: " + selectedClip.timeStr);
-                btnDownloadToUsb.setEnabled(true);
+                checkUsbStatus();
                 playGalleryPreview(selectedClip);
                 return true;
             } else if (!inGallery && hasRearCamera) {
@@ -1836,6 +2286,8 @@ public class MainActivity extends Activity {
     private void exitWithReboot() {
         if (isExiting) return;
         isExiting = true;
+        liveRequestGeneration++;
+        galleryLoadGeneration++;
         lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
         DebugLogger.log("EXIT", "User selected Exit & Reboot");
         Toast.makeText(this, "Restoring Wi-Fi and rebooting head unit...", Toast.LENGTH_SHORT).show();
@@ -1911,6 +2363,8 @@ public class MainActivity extends Activity {
     private void exitAndRestoreProjection() {
         if (isExiting) return;
         isExiting = true;
+        liveRequestGeneration++;
+        galleryLoadGeneration++;
         lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
         Toast.makeText(this, "Restoring previous Wi-Fi state...", Toast.LENGTH_SHORT).show();
 
@@ -1943,6 +2397,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         lifecycleHandler.removeCallbacksAndMessages(null);
+        clearPhotoPreview();
         if (vlcPlayerManager != null) vlcPlayerManager.release();
         if (usbDownloader != null) usbDownloader.shutdown();
         if (wifiBridge != null) {
@@ -1964,6 +2419,7 @@ public class MainActivity extends Activity {
             TextView tvLockBadge;
             TextView tvSize;
             Button btnItemDownload;
+            ClipItem boundClip;
         }
 
         @Override
@@ -1983,7 +2439,7 @@ public class MainActivity extends Activity {
 
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
-            ViewHolder holder;
+            final ViewHolder holder;
             if (convertView == null) {
                 convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item_clip, parent, false);
                 holder = new ViewHolder();
@@ -1993,43 +2449,54 @@ public class MainActivity extends Activity {
                 holder.tvLockBadge = (TextView) convertView.findViewById(R.id.tv_lock_badge);
                 holder.tvSize = (TextView) convertView.findViewById(R.id.tv_clip_size);
                 holder.btnItemDownload = (Button) convertView.findViewById(R.id.btn_item_download);
+                if (holder.btnItemDownload != null) {
+                    holder.btnItemDownload.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            ClipItem item = holder.boundClip;
+                            if (item == null) return;
+                            selectedClip = item;
+                            tvSelectedClipName.setText(item.filename);
+                            tvClipDetails.setText("Size: " + item.getFormattedSize() + " | Time: " + item.timeStr);
+                            startUsbDownload(item);
+                        }
+                    });
+                }
                 convertView.setTag(holder);
             } else {
                 holder = (ViewHolder) convertView.getTag();
             }
 
             final ClipItem clip = displayedClips.get(position);
+            holder.boundClip = clip;
 
             holder.tvFilename.setText(clip.filename);
             holder.tvTime.setText(clip.timeStr != null && !clip.timeStr.isEmpty() ? clip.timeStr : "-");
             holder.tvSize.setText(clip.getFormattedSize());
 
+            // Clean colored text badges without colored background boxes
             if (clip.isFront) {
                 holder.tvCamBadge.setText("FRONT");
-                holder.tvCamBadge.setBackgroundColor(getResources().getColor(R.color.accent_blue));
+                holder.tvCamBadge.setTextColor(getResources().getColor(R.color.accent_blue));
             } else {
                 holder.tvCamBadge.setText("REAR");
-                holder.tvCamBadge.setBackgroundColor(getResources().getColor(R.color.accent_gold));
+                holder.tvCamBadge.setTextColor(getResources().getColor(R.color.accent_gold));
             }
 
-            if (clip.isLocked) {
+            if (clip.isPhoto && clip.isLocked) {
+                holder.tvLockBadge.setVisibility(View.VISIBLE);
+                holder.tvLockBadge.setText("PHOTO \u00B7 LOCKED");
+                holder.tvLockBadge.setTextColor(getResources().getColor(R.color.accent_red));
+            } else if (clip.isLocked) {
                 holder.tvLockBadge.setVisibility(View.VISIBLE);
                 holder.tvLockBadge.setText("LOCKED");
-                holder.tvLockBadge.setBackgroundColor(getResources().getColor(R.color.accent_red));
+                holder.tvLockBadge.setTextColor(getResources().getColor(R.color.accent_red));
+            } else if (clip.isPhoto) {
+                holder.tvLockBadge.setVisibility(View.VISIBLE);
+                holder.tvLockBadge.setText("PHOTO");
+                holder.tvLockBadge.setTextColor(getResources().getColor(R.color.accent_green));
             } else {
                 holder.tvLockBadge.setVisibility(View.GONE);
-            }
-
-            if (holder.btnItemDownload != null) {
-                holder.btnItemDownload.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        selectedClip = clip;
-                        tvSelectedClipName.setText(clip.filename);
-                        tvClipDetails.setText("Size: " + clip.getFormattedSize() + " | Time: " + clip.timeStr);
-                        startUsbDownload(clip);
-                    }
-                });
             }
 
             return convertView;

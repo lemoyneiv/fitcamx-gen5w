@@ -226,11 +226,15 @@ public class FitcamUnitTests {
         byte[] tailMoov = "\0\0\0\u0090moov\0\0\0\u0088trak\0\0\0\u0080stsd\0\0\0\0\0\0\0\u0001\0\0\0\u0070hev1\0\0\0\0\0\0\0\u0001".getBytes(StandardCharsets.ISO_8859_1);
         System.arraycopy(tailMoov, 0, nonFaststartMp4, nonFaststartMp4.length - tailMoov.length - 128, tailMoov.length);
 
-        File tmpMp4 = Files.createTempFile("fitcam_tail_moov_", ".MP4").toFile();
+        File tmpMp4 = Files.createTempFile("fitcam tail moov ", ".MP4").toFile();
         try {
             Files.write(tmpMp4.toPath(), nonFaststartMp4);
             check("Local non-faststart MP4 (tail moov after 150KB mdat) detected via RandomAccessFile",
                   TsHeaderSniffer.sniffCodec(tmpMp4.getAbsolutePath()) == TsHeaderSniffer.CODEC_HEVC);
+            String fileUriWithPct20 = tmpMp4.toURI().toString();
+            check("file:// URI with percent-encoded spaces (%20) decoded and sniffed cleanly",
+                  fileUriWithPct20.contains("%20")
+                  && TsHeaderSniffer.sniffCodec(fileUriWithPct20) == TsHeaderSniffer.CODEC_HEVC);
         } finally {
             tmpMp4.delete();
         }
@@ -254,11 +258,50 @@ public class FitcamUnitTests {
                 os.close();
             }
         });
+        // Server that rejects suffix Range (bytes=-65536) with 416, requiring HEAD + explicit Range: bytes=X-Y
+        rangeServer.createContext("/CARDV/MOVIE/EXPLICIT_TAIL.MP4", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange ex) throws IOException {
+                if ("HEAD".equalsIgnoreCase(ex.getRequestMethod())) {
+                    ex.getResponseHeaders().set("Content-Length", String.valueOf(nonFaststartMp4.length));
+                    ex.sendResponseHeaders(200, -1);
+                    ex.close();
+                    return;
+                }
+                String range = ex.getRequestHeaders().getFirst("Range");
+                if (range != null && range.startsWith("bytes=-")) {
+                    ex.sendResponseHeaders(416, -1);
+                    ex.close();
+                    return;
+                }
+                if (range != null && range.startsWith("bytes=")) {
+                    String spec = range.substring("bytes=".length());
+                    int dash = spec.indexOf('-');
+                    int start = Integer.parseInt(spec.substring(0, dash));
+                    int end = Integer.parseInt(spec.substring(dash + 1));
+                    byte[] slice = Arrays.copyOfRange(nonFaststartMp4, start, Math.min(nonFaststartMp4.length, end + 1));
+                    ex.sendResponseHeaders(206, slice.length);
+                    OutputStream os = ex.getResponseBody();
+                    os.write(slice);
+                    os.close();
+                    return;
+                }
+                byte[] head = Arrays.copyOfRange(nonFaststartMp4, 0, 8192);
+                ex.sendResponseHeaders(200, head.length);
+                OutputStream os = ex.getResponseBody();
+                os.write(head);
+                os.close();
+            }
+        });
         rangeServer.start();
         try {
-            String url = "http://127.0.0.1:" + rangeServer.getAddress().getPort() + "/CARDV/MOVIE/TAIL.MP4";
+            int rPort = rangeServer.getAddress().getPort();
+            String url = "http://127.0.0.1:" + rPort + "/CARDV/MOVIE/TAIL.MP4";
             check("HTTP non-faststart MP4 detected via Range: bytes=-65536 fallback",
                   TsHeaderSniffer.sniffCodec(url) == TsHeaderSniffer.CODEC_HEVC);
+            String explicitUrl = "http://127.0.0.1:" + rPort + "/CARDV/MOVIE/EXPLICIT_TAIL.MP4";
+            check("HTTP non-faststart MP4 detected via HEAD + explicit Range: bytes=start-end when suffix Range returns 416",
+                  TsHeaderSniffer.sniffCodec(explicitUrl) == TsHeaderSniffer.CODEC_HEVC);
         } finally {
             rangeServer.stop(0);
         }
@@ -315,6 +358,64 @@ public class FitcamUnitTests {
         List<ClipItem> recovered = XmlListParser.parseFileList(midBrokenXml);
         check("XmlListParser recovers remaining clips via regex after mid-XML structural error without losing RO lock",
               recovered.size() == 2 && recovered.get(0).filename.equals("20261108_120500A.TS") && recovered.get(0).isLocked);
+
+        // Still photo support (.JPG / .PNG), CARDV/PHOTO URL mapping, and KB size formatting
+        ClipItem barePhoto = new ClipItem("20261110_143000A.JPG", 420L * 1024L, "2026/11/10 14:30:00", 32);
+        ClipItem rearPhoto = new ClipItem("A:\\CARDV\\PHOTO\\20261110_143005B.JPG", 380L * 1024L, "2026/11/10 14:30:05", 32);
+        check("ClipItem classifies .JPG snapshots as isPhoto=true, preserves Front/Rear tag, and formats <1MB in KB",
+              barePhoto.isPhoto && barePhoto.isFront
+              && "http://192.168.1.254/CARDV/PHOTO/20261110_143000A.JPG".equals(barePhoto.getHttpUrl("192.168.1.254", false, 80))
+              && "420 KB".equals(barePhoto.getFormattedSize())
+              && rearPhoto.isPhoto && !rearPhoto.isFront);
+
+        // Cross-folder identical basename preservation (MOVIE vs EMR)
+        String crossFolderXml = "<LIST>" +
+            "<ALLFile><File><NAME>20261108_120000A.TS</NAME><FPATH>A:\\CARDV\\MOVIE\\20261108_120000A.TS</FPATH><SIZE>100000</SIZE><TIME>2026/11/08 12:00:00</TIME><ATTR>32</ATTR></File></ALLFile>" +
+            "<ALLFile><File><NAME>20261108_120000A.TS</NAME><FPATH>A:\\CARDV\\EMR\\20261108_120000A.TS</FPATH><SIZE>100000</SIZE><TIME>2026/11/08 12:00:05</TIME><ATTR>33</ATTR></File></ALLFile>" +
+            "<ALLFile><File><NAME>20261108_120000A.TS</NAME><FPATH>A:\\CARDV\\EMR\\20261108_120000A.TS</FPATH><SIZE>100000</SIZE><TIME>2026/11/08 12:00:05</TIME><ATTR>33</ATTR></File></ALLFile>" +
+            "</LIST>";
+        List<ClipItem> crossItems = XmlListParser.parseFileList(crossFolderXml);
+        check("XmlListParser preserves identical basenames across MOVIE and EMR while deduplicating identical paths",
+              crossItems.size() == 2 && crossItems.get(0).isLocked && !crossItems.get(1).isLocked);
+
+        // HTML directory index parsing for supplemental /CARDV/PHOTO/ fallback
+        String photoHtml = "<html><body><a href=\"../\">../</a>" +
+            "<a href=\"20261110_091522A.JPG\">20261110_091522A.JPG</a>" +
+            "<a href=\"20261110_091522B.PNG\">20261110_091522B.PNG</a>" +
+            "<a href=\"THUMB.TXT\">THUMB.TXT</a></body></html>";
+        List<ClipItem> htmlPhotos = XmlListParser.parseFileList(photoHtml, "CARDV/PHOTO/");
+        check("XmlListParser parses HTML <a href> photo directory listings and ignores non-media files",
+              htmlPhotos.size() == 2 && htmlPhotos.get(0).isPhoto && htmlPhotos.get(1).isPhoto);
+
+        // 120-item TimSort comparator transitivity stress test (valid, empty, malformed, and equal timestamps)
+        boolean timSortTransitive = true;
+        try {
+            java.util.Random rng = new java.util.Random(42L);
+            for (int trial = 0; trial < 10; trial++) {
+                List<ClipItem> mixed = new ArrayList<ClipItem>();
+                for (int i = 0; i < 120; i++) {
+                    String t;
+                    int mod = i % 5;
+                    if (mod == 0) t = "";
+                    else if (mod == 1) t = null;
+                    else if (mod == 2) t = "2026/11/10 12:00:" + String.format("%02d", i % 60);
+                    else if (mod == 3) t = "2026-11-10 12:00:15";
+                    else t = "INVALID_TIME_" + (i % 7);
+                    String folder = (i % 3 == 0) ? "A:\\CARDV\\PHOTO\\" : "A:\\CARDV\\MOVIE\\";
+                    String ext = (i % 3 == 0) ? ".JPG" : ".TS";
+                    mixed.add(new ClipItem(folder + "CLIP_" + (i % 25) + ext, i * 1024L, t, 32));
+                }
+                Collections.shuffle(mixed, rng);
+                XmlListParser.sortClipsDescending(mixed);
+                if (mixed.get(0).timeStr == null || mixed.get(0).timeStr.isEmpty()) {
+                    timSortTransitive = false;
+                }
+            }
+        } catch (Throwable sortErr) {
+            timSortTransitive = false;
+        }
+        check("XmlListParser.sortClipsDescending satisfies strict TimSort total-order transitivity on 120 mixed items",
+              timSortTransitive);
     }
 
     private static void testCameraClientProtocol() throws Exception {
@@ -336,13 +437,28 @@ public class FitcamUnitTests {
         ntkClient.shutdown();
 
         final List<String> receivedQueries = Collections.synchronizedList(new ArrayList<String>());
+        final AtomicInteger statusToReturn = new AtomicInteger(0);
         HttpServer camServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         camServer.createContext("/", new HttpHandler() {
             @Override
             public void handle(HttpExchange ex) throws IOException {
+                String path = ex.getRequestURI().getPath();
                 String rawQuery = ex.getRequestURI().getRawQuery();
-                receivedQueries.add(rawQuery != null ? rawQuery : "");
-                byte[] resp = "<Function><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                receivedQueries.add(rawQuery != null ? rawQuery : path);
+                byte[] resp;
+                if ("/CARDV/PHOTO/".equals(path)) {
+                    resp = "<html><a href=\"20261110_150000A.JPG\">20261110_150000A.JPG</a></html>".getBytes(StandardCharsets.UTF_8);
+                } else if (rawQuery != null && rawQuery.contains("cmd=3015")) {
+                    resp = ("<LIST><ALLFile><File><NAME>20261110_145900A.TS</NAME>"
+                            + "<FPATH>A:\\CARDV\\MOVIE\\20261110_145900A.TS</FPATH>"
+                            + "<SIZE>80000000</SIZE><TIME>2026/11/10 14:59:00</TIME><ATTR>32</ATTR></File></ALLFile></LIST>")
+                            .getBytes(StandardCharsets.UTF_8);
+                } else if (rawQuery != null && rawQuery.contains("cmd=2019")) {
+                    resp = "<Function><Cmd>2019</Cmd><Status>0</Status><MovieLiveViewLink>rtsp://127.0.0.1/xxx.mov</MovieLiveViewLink></Function>"
+                            .getBytes(StandardCharsets.UTF_8);
+                } else {
+                    resp = ("<Function><Status>" + statusToReturn.get() + "</Status></Function>").getBytes(StandardCharsets.UTF_8);
+                }
                 ex.sendResponseHeaders(200, resp.length);
                 OutputStream os = ex.getResponseBody();
                 os.write(resp);
@@ -371,6 +487,52 @@ public class FitcamUnitTests {
             }
             check("syncCarTime sends cmd=3005 + cmd=3006 without malformed cmd=3014 or raw spaces",
                   synced && has3005 && has3006 && !hasBad3014 && !hasRawSpace);
+
+            // Fast PIP switch check (first live start caches Movie mode + cmd=2019; second switch sends ONLY cmd=3028)
+            final CountDownLatch live1Latch = new CountDownLatch(1);
+            mockCam.prepareAndStartLiveView(CameraClient.VIEW_FRONT, new CameraClient.Callback<List<String>>() {
+                @Override public void onSuccess(List<String> r) { live1Latch.countDown(); }
+                @Override public void onError(Exception e) { live1Latch.countDown(); }
+            });
+            live1Latch.await(3, TimeUnit.SECONDS);
+            receivedQueries.clear();
+            final CountDownLatch live2Latch = new CountDownLatch(1);
+            mockCam.prepareAndStartLiveView(CameraClient.VIEW_DUAL, new CameraClient.Callback<List<String>>() {
+                @Override public void onSuccess(List<String> r) { live2Latch.countDown(); }
+                @Override public void onError(Exception e) { live2Latch.countDown(); }
+            });
+            live2Latch.await(3, TimeUnit.SECONDS);
+            check("Fast PIP view switch sends single non-disruptive cmd=3028&par=2 without pausing recording",
+                  receivedQueries.size() == 1 && "custom=1&cmd=3028&par=2".equals(receivedQueries.get(0)));
+
+            // Supplemental photo discovery during fetchClipList
+            final CountDownLatch listLatch = new CountDownLatch(1);
+            final List<ClipItem> fetchedItems = Collections.synchronizedList(new ArrayList<ClipItem>());
+            mockCam.fetchClipList(new CameraClient.Callback<List<ClipItem>>() {
+                @Override public void onSuccess(List<ClipItem> r) { fetchedItems.addAll(r); listLatch.countDown(); }
+                @Override public void onError(Exception e) { listLatch.countDown(); }
+            });
+            listLatch.await(4, TimeUnit.SECONDS);
+            boolean hasVideo = false, hasPhoto = false;
+            for (ClipItem item : fetchedItems) {
+                if (item.isPhoto) hasPhoto = true;
+                else hasVideo = true;
+            }
+            check("fetchClipList returns both video clips and supplemental /CARDV/PHOTO/ snapshots",
+                  fetchedItems.size() == 2 && hasVideo && hasPhoto);
+
+            // Negative CGI <Status>-13</Status> rejection check
+            statusToReturn.set(-13);
+            final CountDownLatch negLatch = new CountDownLatch(1);
+            final AtomicBoolean rejectedNegativeStatus = new AtomicBoolean(false);
+            mockCam.setAudioEnabled(false, new CameraClient.Callback<Boolean>() {
+                @Override public void onSuccess(Boolean r) { negLatch.countDown(); }
+                @Override public void onError(Exception e) { rejectedNegativeStatus.set(true); negLatch.countDown(); }
+            });
+            negLatch.await(3, TimeUnit.SECONDS);
+            check("CameraClient rejects negative CGI <Status>-13</Status> instead of reporting false success",
+                  rejectedNegativeStatus.get());
+            statusToReturn.set(0);
 
             receivedQueries.clear();
             final CountDownLatch teardownLatch = new CountDownLatch(1);
@@ -545,6 +707,54 @@ public class FitcamUnitTests {
               && Collections.frequency(cands, "192.168.1.254") == 1);
     }
 
+    private static void testScreenshotColorNormalizer() {
+        System.out.println("\n--- 9. ScreenshotHelper TCC803x BGRA<->RGBA Detection & Channel Swap ---");
+        int w = 40, h = 20;
+        int[] img = new int[w * h];
+        Arrays.fill(img, 0xFF151922); // dark sidebar background
+
+        // Fill FITCAMX ROI [4..24, 2..12) with TCC803x BGRA-swapped orange pixels: R=157, G=95, B=21
+        int swappedOrange = 0xFF000000 | (157 << 16) | (95 << 8) | 21;
+        for (int y = 2; y < 12; y++) {
+            for (int x = 4; x < 24; x++) {
+                img[y * w + x] = swappedOrange;
+            }
+        }
+        check("shouldSwapRedBlue detects TCC803x BGRA-swapped orange FITCAMX logo pixels",
+              ScreenshotHelper.shouldSwapRedBlue(img, w, h, 4, 2, 24, 12));
+
+        ScreenshotHelper.swapRedBlueInPlace(img);
+        int corrected = img[5 * w + 10];
+        int r = (corrected >>> 16) & 0xFF;
+        int g = (corrected >>> 8) & 0xFF;
+        int b = corrected & 0xFF;
+        check("swapRedBlueInPlace restores exact true-blue RGB channels (21, 95, 157) while preserving alpha & green",
+              ((corrected >>> 24) & 0xFF) == 0xFF && r == 21 && g == 95 && b == 157);
+        check("shouldSwapRedBlue returns false on already true-blue RGBA screenshots (idempotent)",
+              !ScreenshotHelper.shouldSwapRedBlue(img, w, h, 4, 2, 24, 12));
+    }
+
+    private static void testGalleryBufferingAndSpinnerPolicy() {
+        System.out.println("\n--- 10. VlcPlayerManager Gallery Buffering & Spinner Visibility Policy ---");
+        check("Pre-Vout initial buffering (<100%) displays loading spinner",
+              VlcPlayerManager.shouldShowSpinnerOnBuffering(0.0f, false)
+              && VlcPlayerManager.shouldShowSpinnerOnBuffering(65.0f, false));
+        check("Buffering at 100% never displays loading spinner",
+              !VlcPlayerManager.shouldShowSpinnerOnBuffering(100.0f, false)
+              && !VlcPlayerManager.shouldShowSpinnerOnBuffering(100.0f, true));
+        check("Post-Vout minor HTTP TCP jitter (25%-99%) does NOT flash spinner over playing 1080p video",
+              !VlcPlayerManager.shouldShowSpinnerOnBuffering(85.0f, true)
+              && !VlcPlayerManager.shouldShowSpinnerOnBuffering(25.0f, true));
+        check("Post-Vout seek or genuine cache underrun (<25%) displays spinner cleanly",
+              VlcPlayerManager.shouldShowSpinnerOnBuffering(0.0f, true)
+              && VlcPlayerManager.shouldShowSpinnerOnBuffering(15.0f, true));
+        check("Active progress clears stuck spinner once >=400ms elapsed since last incomplete buffering event",
+              !VlcPlayerManager.shouldClearSpinnerOnProgress(true, true, 1000L, 1200L)
+              && VlcPlayerManager.shouldClearSpinnerOnProgress(true, true, 1000L, 1450L)
+              && VlcPlayerManager.shouldClearSpinnerOnProgress(true, true, 0L, 1050L)
+              && !VlcPlayerManager.shouldClearSpinnerOnProgress(true, false, 0L, 2000L));
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== FITCAMX Gen5W Automated Java Unit & Integration Test Suite ===\n");
         testDebugLoggerRamOnly();
@@ -555,6 +765,8 @@ public class FitcamUnitTests {
         testUsbDownloaderAtomicity();
         testGalleryRatePolicy();
         testWifiFastConnectHelpers();
+        testScreenshotColorNormalizer();
+        testGalleryBufferingAndSpinnerPolicy();
 
         System.out.println("\n=== Java Test Summary: " + passed + " passed, " + failed + " failed ===");
         if (failed > 0) {

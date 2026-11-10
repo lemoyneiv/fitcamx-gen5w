@@ -58,10 +58,25 @@ public class TsHeaderSniffer {
                 }
             } else {
                 String filePath = playUri;
-                if (filePath.startsWith("file://")) {
-                    filePath = filePath.substring(7);
+                if (filePath.startsWith("file:")) {
+                    try {
+                        localFile = new File(new java.net.URI(filePath));
+                    } catch (Exception uriErr) {
+                        if (filePath.startsWith("file://")) {
+                            filePath = filePath.substring(7);
+                        } else {
+                            filePath = filePath.substring(5);
+                        }
+                        try {
+                            filePath = java.net.URLDecoder.decode(filePath, "UTF-8");
+                        } catch (Exception ignored) {
+                            filePath = filePath.replace("%20", " ");
+                        }
+                        localFile = new File(filePath);
+                    }
+                } else {
+                    localFile = new File(filePath);
                 }
-                localFile = new File(filePath);
                 if (!localFile.exists() || !localFile.canRead()) return CODEC_UNKNOWN;
 
                 is = new FileInputStream(localFile);
@@ -138,7 +153,24 @@ public class TsHeaderSniffer {
                 conn.setRequestProperty("Connection", "close");
                 int code = conn.getResponseCode();
                 if (code != 206) {
-                    return CODEC_UNKNOWN;
+                    conn.disconnect();
+                    conn = null;
+                    // Fallback for embedded HTTP servers that reject suffix ranges ("bytes=-N")
+                    // but honor explicit ranges ("bytes=<start>-<end>") after HEAD Content-Length query.
+                    long contentLen = queryHttpContentLength(playUri);
+                    if (contentLen <= BUFFER_SIZE) {
+                        return CODEC_UNKNOWN;
+                    }
+                    long startByte = Math.max(0L, contentLen - TAIL_BUFFER_SIZE);
+                    conn = (HttpURLConnection) new URL(playUri).openConnection();
+                    conn.setConnectTimeout(1000);
+                    conn.setReadTimeout(1200);
+                    conn.setRequestMethod("GET");
+                    conn.setRequestProperty("Range", "bytes=" + startByte + "-" + (contentLen - 1));
+                    conn.setRequestProperty("Connection", "close");
+                    if (conn.getResponseCode() != 206) {
+                        return CODEC_UNKNOWN;
+                    }
                 }
                 is = conn.getInputStream();
                 byte[] tail = new byte[TAIL_BUFFER_SIZE];
@@ -316,11 +348,32 @@ public class TsHeaderSniffer {
         return CODEC_UNKNOWN;
     }
 
+    private static long queryHttpContentLength(String playUri) {
+        HttpURLConnection headConn = null;
+        try {
+            headConn = (HttpURLConnection) new URL(playUri).openConnection();
+            headConn.setConnectTimeout(800);
+            headConn.setReadTimeout(800);
+            headConn.setRequestMethod("HEAD");
+            headConn.setRequestProperty("Connection", "close");
+            if (headConn.getResponseCode() == 200) {
+                return headConn.getContentLength();
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (headConn != null) {
+                try { headConn.disconnect(); } catch (Exception ignored) {}
+            }
+        }
+        return -1L;
+    }
+
     private static int resolveTableStart(byte[] data, int pktStart, int length) {
         int pktEnd = Math.min(pktStart + 188, length);
         if (pktStart + 4 >= pktEnd) return -1;
 
         boolean pusi = (data[pktStart + 1] & 0x40) != 0;
+        if (!pusi) return -1;
         int afc = (data[pktStart + 3] & 0x30) >> 4;
         if (afc == 0 || afc == 2) return -1;
 
@@ -331,11 +384,8 @@ public class TsHeaderSniffer {
         }
         if (payloadStart >= pktEnd) return -1;
 
-        int tableStart = payloadStart;
-        if (pusi) {
-            int ptr = data[payloadStart] & 0xFF;
-            tableStart = payloadStart + 1 + ptr;
-        }
+        int ptr = data[payloadStart] & 0xFF;
+        int tableStart = payloadStart + 1 + ptr;
         if (tableStart >= pktEnd) return -1;
         return tableStart;
     }

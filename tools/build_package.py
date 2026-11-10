@@ -119,19 +119,21 @@ cmd_aapt = [
 ]
 subprocess.run(cmd_aapt, check=True)
 
-# Inject classes.dex and native .so libraries into unsigned APK
-with zipfile.ZipFile(unsigned_apk, "a") as z:
-    z.write(dex_file, "classes.dex")
+# Inject classes.dex and native .so libraries into unsigned APK using DEFLATE compression.
+# On Android 4.4.2 KitKat (API 19), PackageManager extracts lib/armeabi-v7a/*.so into /data/app-lib/
+# while retaining a copy of Fitcamx.apk in /data/app/, so ZIP_DEFLATED saves ~37.7 MB of /data flash.
+with zipfile.ZipFile(unsigned_apk, "a", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    z.write(dex_file, "classes.dex", compress_type=zipfile.ZIP_DEFLATED)
     jni_dir = os.path.join(BASE_DIR, "app", "src", "main", "jniLibs")
     if os.path.isdir(jni_dir):
         for root, _, files in os.walk(jni_dir):
-            for f in files:
+            for f in sorted(files):
                 if f.endswith(".so"):
                     full_p = os.path.join(root, f)
                     rel_p = os.path.relpath(full_p, jni_dir).replace("\\", "/")
                     arcname = "lib/" + rel_p
-                    z.write(full_p, arcname)
-                    print(f"  Injected native lib: {arcname} ({os.path.getsize(full_p):,} bytes)")
+                    z.write(full_p, arcname, compress_type=zipfile.ZIP_DEFLATED)
+                    print(f"  Injected native lib (deflated): {arcname} ({os.path.getsize(full_p):,} bytes)")
 print("  Injected classes.dex and native libraries into APK.")
 
 # 5. Zipalign APK
@@ -190,6 +192,10 @@ if os.path.isfile(os.path.join(BASE_DIR, "tools", "sign.py")):
 elif os.path.isfile(os.path.join(BASE_DIR, "..", "tools", "sign.py")):
     sys.path.insert(0, os.path.join(BASE_DIR, "..", "tools"))
 import sign
+
+# Clean stale packages from dist/ before generating current release archives
+for old_pkg in glob.glob(os.path.join(DIST_DIR, "fitcamx-gen5w-v*.zip")):
+    os.remove(old_pkg)
 
 hmgapi_candidates = [
     os.path.abspath(os.path.join(BASE_DIR, "third_party", "HMG-API")),

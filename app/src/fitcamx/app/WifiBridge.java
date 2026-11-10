@@ -231,7 +231,7 @@ public class WifiBridge {
         }
         registerReceivers();
 
-        boolean apCurrentlyEnabled = isWifiApEnabled();
+        boolean apCurrentlyEnabled = isWifiApActiveOrEnabling();
         int currentApMode = getWifiApMode();
         if (apCurrentlyEnabled) {
             notifyStatus("Preparing Wi-Fi for dashcam...");
@@ -257,7 +257,7 @@ public class WifiBridge {
         @Override
         public void run() {
             if (isRestoring) return;
-            if (!isWifiApEnabled()) {
+            if (!isWifiApActiveOrEnabling()) {
                 DebugLogger.log("WIFI", "AP disable fallback timer triggered enableStationMode()");
                 enableStationMode();
             }
@@ -266,7 +266,7 @@ public class WifiBridge {
 
     private void recordInitialState() {
         try {
-            initialApEnabled = isWifiApEnabled();
+            initialApEnabled = isWifiApActiveOrEnabling();
             initialApMode = getWifiApMode();
             initialApConfig = getWifiApConfiguration();
             initialWifiEnabled = (wifiManager != null && wifiManager.isWifiEnabled());
@@ -1039,21 +1039,30 @@ public class WifiBridge {
                             return;
                         }
                         WifiInfo cur = wifiManager.getConnectionInfo();
-                        boolean rightNet = true;
-                        if (cur != null && cur.getSSID() != null) {
-                            String curSsid = cleanSsid(cur.getSSID());
+                        boolean rightNet = false;
+                        int connIp = 0;
+                        if (cur != null) {
+                            connIp = cur.getIpAddress();
+                            boolean supplicantDone = (cur.getSupplicantState() == SupplicantState.COMPLETED);
+                            String curSsid = (cur.getSSID() != null) ? cleanSsid(cur.getSSID()) : "";
                             if (!curSsid.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(curSsid) && !"0x".equalsIgnoreCase(curSsid)) {
-                                rightNet = curSsid.equalsIgnoreCase(cleanedSsid)
-                                        && cur.getSupplicantState() == SupplicantState.COMPLETED;
+                                rightNet = curSsid.equalsIgnoreCase(cleanedSsid) && supplicantDone;
+                            } else {
+                                rightNet = supplicantDone;
                             }
                             activeBssid = cur.getBSSID();
                         }
                         DhcpInfo dhcp = wifiManager.getDhcpInfo();
-                        if (rightNet && dhcp != null && dhcp.ipAddress != 0) {
-                            myIp = intToIp(dhcp.ipAddress);
-                            gatewayIp = (dhcp.gateway != 0) ? intToIp(dhcp.gateway) : CameraClient.DEFAULT_CAMERA_IP;
-                            netmask = intToIp(dhcp.netmask);
-                            DebugLogger.log("WIFI_DHCP", "Acquired IP=" + myIp + " Gateway=" + gatewayIp + " Netmask=" + netmask + " DNS1=" + intToIp(dhcp.dns1) + " Server=" + intToIp(dhcp.serverAddress));
+                        // Guard against stale KitKat DhcpInfo from a prior Wi-Fi network during the first ~3s of association
+                        boolean freshIpMatch = (dhcp != null && dhcp.ipAddress != 0)
+                                && ((connIp != 0 && connIp == dhcp.ipAddress) || (attempt >= 20 && connIp != 0) || attempt >= 25);
+                        if (rightNet && freshIpMatch) {
+                            int chosenIp = (dhcp.ipAddress != 0) ? dhcp.ipAddress : connIp;
+                            myIp = intToIp(chosenIp);
+                            gatewayIp = (dhcp != null && dhcp.gateway != 0) ? intToIp(dhcp.gateway) : CameraClient.DEFAULT_CAMERA_IP;
+                            netmask = (dhcp != null) ? intToIp(dhcp.netmask) : "255.255.255.0";
+                            DebugLogger.log("WIFI_DHCP", "Acquired IP=" + myIp + " Gateway=" + gatewayIp + " Netmask=" + netmask
+                                    + " DNS1=" + intToIp(dhcp != null ? dhcp.dns1 : 0) + " Server=" + intToIp(dhcp != null ? dhcp.serverAddress : 0));
                             break;
                         }
                         if (attempt % 7 == 0) {
@@ -1063,9 +1072,20 @@ public class WifiBridge {
                     }
 
                     if (myIp == null) {
-                        DebugLogger.log("WIFI_DHCP", "DHCP timeout: Wi-Fi connected to " + cleanedSsid + ", but no IP address assigned.");
-                        notifyStatus("DHCP timeout: Wi-Fi connected to " + cleanedSsid + ", but no IP address assigned yet.");
-                        isProbingCamera = false;
+                        DebugLogger.log("WIFI_DHCP", "DHCP timeout on " + cleanedSsid + "; triggering automatic reconnect/rescan.");
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                isProbingCamera = false;
+                                if (isRestoring) return;
+                                notifyStatus("DHCP timed out on " + cleanedSsid + ". Reconnecting...");
+                                try {
+                                    wifiManager.disconnect();
+                                    wifiManager.reassociate();
+                                } catch (Exception ignored) {}
+                                startScanLoop();
+                            }
+                        });
                         return;
                     }
 
@@ -1408,6 +1428,9 @@ public class WifiBridge {
             DebugLogger.log("WIFI_RESTORE", "Error restoring Wi-Fi state: " + e.getMessage());
         }
 
+        // Allow fresh baseline capture if activity later resumes from background
+        initialStateRecorded = false;
+
         if (listener != null) {
             listener.onDisconnected();
         }
@@ -1444,6 +1467,23 @@ public class WifiBridge {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Checks both WIFI_AP_STATE_ENABLING (12) and WIFI_AP_STATE_ENABLED (13) so a rapid
+     * foreground resume during SoftAP bring-up still cleanly tears down SoftAP first.
+     */
+    public boolean isWifiApActiveOrEnabling() {
+        if (isWifiApEnabled()) return true;
+        try {
+            Method m = wifiManager.getClass().getMethod("getWifiApState");
+            Object res = m.invoke(wifiManager);
+            if (res instanceof Integer) {
+                int st = (Integer) res;
+                return st == WIFI_AP_STATE_ENABLING || st == WIFI_AP_STATE_ENABLED;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     public int getWifiApMode() {
