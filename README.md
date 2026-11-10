@@ -17,19 +17,28 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 The application is specifically engineered for Gen5W 24:9 ultra-widescreen infotainment displays (1920×720 and 2560×720), featuring ergonomic driver-side controls, centered 16:9 aspect-ratio video surfaces, and non-intrusive translucent overlays.
 
 ### Live View (Front 4K Stream)
-*Sub-second RTSP live monitoring with real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
-![Live View - Front Camera](docs/screenshots/01_live_view.png)
+*RTSP live monitoring with real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
+
+![Live View - Front Camera](docs/screenshots/01_live_front.png)
+
+![Dual Camera View](docs/screenshots/02_live_dual.png)
+
+![Rear Camera View](docs/screenshots/03_live_rear.png)
 
 ### SD Card Footage Gallery & Playback
-*Indexed SD card clip browser (`CARDV/MOVIE` & `CARDV/EMR`), filter chips, 4K HEVC playback with rate controls, translucent scrub bar overlay, and direct USB export.*
-![SD Card Footage Playback](docs/screenshots/02_gallery_playback.png)
+*Indexed SD card clip browser, filter clips, 4K HEVC playback with rate controls, translucent scrub bar overlay, and direct USB export.*
 
-### Dual Camera Monitoring (Picture-in-Picture)
-*Simultaneous live front and rear camera monitoring with hardware-composited picture-in-picture.*
-![Dual Camera View](docs/screenshots/03_dual_pip_view.png)
+![SD Card Footage Playback](docs/screenshots/05_4K_playback.png)
+
+*File picker can be hidden during playback*
+
+![Hidden File Picker](docs/screenshots/06_hidden_picker.png)
+
+*USB file transfer in progress*
+
+![USB File Transfer](docs/screenshots/07_usb_transfer.png)
 
 ---
-
 ## Installation
 
 ### Prerequisites
