@@ -22,35 +22,18 @@ import zipfile
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BUILD_DIR = os.path.join(BASE_DIR, "build")
 TESTS_DIR = os.path.join(BASE_DIR, "tests")
+sys.path.insert(0, os.path.join(BASE_DIR, "tools"))
+
+import cloud_env
 
 is_win = sys.platform.startswith("win")
 exe_suffix = ".exe" if is_win else ""
 
-java_home = os.environ.get("JAVA_HOME")
-if not java_home or not os.path.isdir(java_home):
-    for cand in [
-        os.path.abspath(os.path.join(BASE_DIR, "..", "tools", "jdk-17")),
-        os.path.expanduser("~/tools/jdk-17"),
-        r"C:\Program Files\Microsoft\jdk-17.0.21.21-hotspot",
-    ]:
-        if os.path.isdir(cand):
-            java_home = cand
-            break
+_jdk = cloud_env.resolve_jdk()
+JAVA = _jdk.java
+JAVAC = _jdk.javac
 
-JDK_BIN = os.path.join(java_home, "bin") if java_home else ""
-JAVA = os.path.join(JDK_BIN, f"java{exe_suffix}") if os.path.isfile(os.path.join(JDK_BIN, f"java{exe_suffix}")) else (shutil.which("java") or "java")
-JAVAC = os.path.join(JDK_BIN, f"javac{exe_suffix}") if os.path.isfile(os.path.join(JDK_BIN, f"javac{exe_suffix}")) else (shutil.which("javac") or "javac")
-
-SDK_DIR = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
-if not SDK_DIR or not os.path.isdir(SDK_DIR):
-    for cand in [
-        os.path.abspath(os.path.join(BASE_DIR, "..", "tools", "android-sdk")),
-        os.path.expanduser("~/tools/android-sdk"),
-    ]:
-        if os.path.isdir(cand):
-            SDK_DIR = cand
-            break
-
+SDK_DIR = cloud_env.ensure_android_sdk()
 ANDROID_JAR = os.path.join(SDK_DIR, "platforms", "android-19", "android.jar")
 BT_DIR = os.path.join(SDK_DIR, "build-tools", "30.0.3")
 DEXDUMP = os.path.join(BT_DIR, f"dexdump{exe_suffix}")
@@ -76,11 +59,17 @@ def run_build_if_needed(force_rebuild: bool):
     dex_path = os.path.join(BUILD_DIR, "dex", "classes.dex")
     apk_path = os.path.join(BUILD_DIR, "Fitcamx.apk")
     classes_dir = os.path.join(BUILD_DIR, "classes")
-    if force_rebuild or not (os.path.isfile(dex_path) and os.path.isfile(apk_path) and os.path.isdir(classes_dir)):
+    dist_zips = glob.glob(os.path.join(BASE_DIR, "dist", "fitcamx-gen5w-v*.zip"))
+    if force_rebuild or not (
+        os.path.isfile(dex_path)
+        and os.path.isfile(apk_path)
+        and os.path.isdir(classes_dir)
+        and len(dist_zips) >= 4
+    ):
         print("=== [Step 1] Building APK & HMG-API Package ===")
         subprocess.run([sys.executable, os.path.join(BASE_DIR, "tools", "build_package.py")], check=True)
     else:
-        print("=== [Step 1] Using up-to-date build artifacts in build/ ===")
+        print("=== [Step 1] Using up-to-date build artifacts in build/ and dist/ ===")
 
 
 def run_java_unit_tests():
@@ -312,16 +301,11 @@ def verify_operational_invariants():
                 r = subprocess.run([sh_bin, "-n", script_p], capture_output=True, text=True)
                 check(f"POSIX shell syntax valid: {script_rel}", r.returncode == 0, r.stderr.strip())
 
-    for hmg_cand in (
-        os.path.abspath(os.path.join(BASE_DIR, "third_party", "HMG-API")),
-        os.path.abspath(os.path.join(BASE_DIR, "..", "third_party", "HMG-API")),
-        os.path.abspath(os.path.join(BASE_DIR, "..", "..", "HMG-API")),
-    ):
-        chk_script = os.path.join(hmg_cand, "tools", "check-scripts.sh")
-        if os.path.isfile(chk_script) and sh_bin:
-            r_chk = subprocess.run([sh_bin, chk_script, os.path.join(BASE_DIR, "mod")], capture_output=True, text=True)
-            check("HMG-API tools/check-scripts.sh (KitKat mksh/toybox conformance)", r_chk.returncode == 0, r_chk.stdout.strip())
-            break
+    hmg_dir = cloud_env.ensure_hmgapi()
+    chk_script = os.path.join(hmg_dir, "tools", "check-scripts.sh")
+    if os.path.isfile(chk_script) and sh_bin:
+        r_chk = subprocess.run([sh_bin, chk_script, os.path.join(BASE_DIR, "mod")], capture_output=True, text=True)
+        check("HMG-API tools/check-scripts.sh (KitKat mksh/toybox conformance)", r_chk.returncode == 0, r_chk.stdout.strip())
 
     # 6. Release archive & NEMESIS package conformance (04-Packages.md)
     dist_dir = os.path.join(BASE_DIR, "dist")

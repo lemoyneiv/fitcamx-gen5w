@@ -248,24 +248,37 @@ The HMG-API platform runs a background daemon `hmgapid` as `root`, listening on 
 
 ---
 
-## 8. Build, Packaging, Signing, and Verification Pipeline
+## 8. Build, Cloud Workflow, Signing, and Verification Pipeline
 
-To build, sign, and run the automated verification suite:
+To build, sign, and run the automated verification suite (self-bootstrapping in cloud VMs, GitHub Actions, and local machines):
 ```bash
 ./build.sh
 python3 tests/run_tests.py
 ```
-`tools/build_package.py` performs the following tasks:
-1. Compiles Java source files with `javac --release 8` against `android-19/android.jar` and `libvlc.jar`.
-2. Shrinks and converts bytecode with `R8 --min-api 19` (`tools/proguard-rules.pro`) into Dalvik `classes.dex` (`dex 035`), stripping post-KitKat classes (`AudioDeviceCallback`, `androidx.lifecycle.Observer`, unused UI widgets).
-3. Injects `classes.dex` and `armeabi-v7a` native libraries (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`) into `unsigned.apk`.
-4. Executes `zipalign -f 4`.
-5. Signs `Fitcamx.apk` with `apksigner` using a 2048-bit RSA keystore (strictly v1 JAR signature: `--v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false`).
-6. Stages the mod directory, invokes `sign.py` with ECDSA SHA256 author keys, and outputs:
-   - `dist/fitcamx-gen5w-v0.7.0.hmgapi.zip`
-   - `dist/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip`
-   - `dist/fitcamx-gen5w-v0.7.0-nemesis-usb.zip`
-   - `dist/fitcamx-gen5w-v0.7.0-nemesis-package.zip`
+`tools/cloud_env.py` and `tools/build_package.py` perform the following tasks automatically:
+1. **Self-Bootstrapping Cloud Toolchain & Persistent Cache:**
+   - Discovers JDK 8/17+ (`JAVA_HOME` or `javac` on `PATH`), automatically downloads & extracts Android `android-19/android.jar` + Build-Tools `30.0.3` (`~/tools/android-sdk`), and shallow-clones `VysseCodes/HMG-API` (`~/tools/HMG-API`).
+   - In Antigravity Cloud VMs, archives are cached in persistent `~/.gemini/fitcamx-gen5w/cache/` so new cloud sessions restore the entire SDK + HMG-API toolchain in ~1 second without re-downloading.
+2. **Bytecode Compilation & Dalvik R8 Shrinking:**
+   - Compiles Java source files with `javac --release 8` against `android-19/android.jar` and `libvlc.jar`.
+   - Shrinks and converts bytecode with `R8 --min-api 19` (`tools/proguard-rules.pro`) into Dalvik `classes.dex` (`dex 035`), stripping post-KitKat classes (`AudioDeviceCallback`, `androidx.lifecycle.Observer`, unused UI widgets).
+3. **Deflated Native Packaging & KitKat v1 Signing:**
+   - Injects `classes.dex` and `armeabi-v7a` native libraries (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`) into `unsigned.apk` with `ZIP_DEFLATED`, then runs `zipalign -f 4`.
+   - Resolves signing keys in priority order: CI Secrets (`FITCAMX_KEYSTORE_BASE64` + `FITCAMX_AUTHOR_KEY`) → persistent cloud keys (`~/.gemini/fitcamx-gen5w/keys/`) → local `../build/keys/` → automatic ephemeral dev keys (`~/.cache/fitcamx-dev-keys`, unless `--require-release-keys` is set).
+   - Signs `Fitcamx.apk` with `apksigner` strictly using Android v1 JAR signature (`--v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false`).
+4. **HMG-API & NEMESIS Packaging (`dist/`, untracked in git):**
+   - Stages `mod/`, invokes `sign.py` with ECDSA SHA256 author keys, and outputs all 4 packages in `dist/` (`*.hmgapi.zip`, `*-hmgapi-usb.zip`, `*-nemesis-usb.zip`, `*-nemesis-package.zip`).
+5. **Cloud Key Management, Google Drive Export & GitHub Actions:**
+   - Check or import production keys (`uuid: 7abe7eda-b784-851a-bb6e-91cb0294bdf1`):
+     ```bash
+     python3 tools/manage_keys.py status
+     python3 tools/manage_keys.py import --sync-github-secrets
+     ```
+   - Sync built packages to the `FITCAMX Gen5W Builds` Google Drive folder:
+     ```bash
+     ./build.sh --sync-gdrive
+     ```
+   - CI & Releases: `.github/workflows/ci.yml` verifies every push/PR and uploads build artifacts; `.github/workflows/release.yml` enforces `--require-release-keys` on `v*.*.*` tags and publishes all 4 signed ZIPs + `SHA256SUMS.txt` to GitHub Releases.
 
 ---
 

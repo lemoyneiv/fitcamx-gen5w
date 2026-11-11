@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Existing tag to build and attach release assets to (e.g. v0.7.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, Verify & Publish Signed Release
+    runs-on: ubuntu-latest
+    env:
+      FITCAMX_CACHE_DIR: ${{ runner.temp }}/fitcamx-toolchain-cache
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Android SDK (API 19 + Build-Tools 30.0.3) & HMG-API
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FITCAMX_CACHE_DIR }}
+          key: fitcamx-toolchain-${{ runner.os }}-api19-bt30.0.3-v1
+
+      - name: Verify tag matches mod/mod.json & AndroidManifest.xml
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag_name }}
+        run: |
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          MOD_VER="$(python3 -c 'import json; print(json.load(open("mod/mod.json"))["version"])')"
+          if [ "$TAG" != "v${MOD_VER}" ]; then
+            echo "ERROR: Tag '$TAG' does not match mod/mod.json version 'v${MOD_VER}'." >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${MOD_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build production-signed release packages
+        env:
+          FITCAMX_KEYSTORE_BASE64: ${{ secrets.FITCAMX_KEYSTORE_BASE64 }}
+          FITCAMX_KEYSTORE_PASS: ${{ secrets.FITCAMX_KEYSTORE_PASS }}
+          FITCAMX_KEY_ALIAS: ${{ secrets.FITCAMX_KEY_ALIAS }}
+          FITCAMX_KEY_PASS: ${{ secrets.FITCAMX_KEY_PASS }}
+          FITCAMX_AUTHOR_KEY: ${{ secrets.FITCAMX_AUTHOR_KEY }}
+          FITCAMX_AUTHOR_PUB: ${{ secrets.FITCAMX_AUTHOR_PUB }}
+        run: ./build.sh --require-release-keys
+
+      - name: Run full verification suite
+        run: python3 tests/run_tests.py
+
+      - name: Generate SHA-256 checksums
+        run: |
+          (cd dist && sha256sum fitcamx-gen5w-v*.zip > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/fitcamx-gen5w-v*.zip dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" dist/fitcamx-gen5w-v*.zip dist/SHA256SUMS.txt \
+              --verify-tag \
+              --title "${TAG}: FITCAMX for Gen5W" \
+              --generate-notes
+          fi

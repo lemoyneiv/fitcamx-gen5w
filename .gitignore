@@ -1,8 +1,11 @@
-# Build outputs
+# Build outputs & release archives (published via GitHub Releases / CI / Google Drive)
 build/
 bin/
 gen/
 out/
+dist/*.zip
+dist/SHA256SUMS.txt
+third_party/
 
 # Archived development releases
 dist/fitcam-dev-releases/

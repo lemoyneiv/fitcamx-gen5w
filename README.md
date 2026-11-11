@@ -50,7 +50,7 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 - Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
 
 ### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release package: [**`fitcamx-gen5w-v0.7.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.7.0)).
+1. Download the latest release package: [**`fitcamx-gen5w-v0.7.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip) from the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.7.0).
 2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
    - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.7.0.zip`.
 3. Insert the flash drive into the vehicle's multimedia USB port.
@@ -59,7 +59,7 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
 
 ### Method 2: NEMESIS Package Store
-1. Download [**`fitcamx-gen5w-v0.7.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.7.0-nemesis-package.zip`](dist/fitcamx-gen5w-v0.7.0-nemesis-package.zip)) and copy to your USB drive.
+1. Download [**`fitcamx-gen5w-v0.7.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-nemesis-usb.zip) (or store package [**`fitcamx-gen5w-v0.7.0-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-nemesis-package.zip)) and copy to your USB drive.
 2. Launch NEMESIS Manager on the head unit and install the package.
 
 ---
@@ -152,19 +152,15 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 
 ---
 
-## Building from Source
+## Building from Source & Cloud Workflow
 
 ### Prerequisites
-- **Operating System:** Linux, macOS, or Windows 10/11
-- **JDK:** Java Development Kit 8 or 17 (`javac`, `keytool`)
-- **Android SDK:**
-  - Build Tools: `30.0.3` (providing `aapt`, `d8`, `zipalign`, `apksigner`)
-  - Platforms: `android-19` (`android.jar`)
-- **Python:** Python 3.8+
-- **OpenSSL:** Standard CLI utility for signing HMG-API packages
-- **Repository Checkout:** [HMG-API](https://github.com/VysseCodes/HMG-API) checked out in a sibling directory or under `third_party/HMG-API`
+- **Operating System:** Linux (including Antigravity Cloud VMs & GitHub Actions), macOS, or Windows 10/11
+- **JDK:** Java Development Kit 8 or 17+ (`javac`, `keytool`)
+- **Python:** Python 3.8+ and **OpenSSL**
+- **Auto-Provisioned Dependencies:** Android SDK (`android-19` + Build-Tools `30.0.3`) and [HMG-API](https://github.com/VysseCodes/HMG-API) are automatically downloaded and cached on first run if not already installed.
 
-### Build Steps
+### Build & Verification Steps
 
 1. Clone this repository:
    ```bash
@@ -172,19 +168,33 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
    cd fitcamx-gen5w
    ```
 
-2. Run the build and verification suite:
+2. Run the self-bootstrapping build and verification suite:
    ```bash
-   python3 tools/build_package.py
+   ./build.sh
    python3 tests/run_tests.py
    ```
 
-The script will:
-1. Generate `R.java` with `aapt`.
-2. Compile Java source files targeting Java 8 (`javac --release 8`).
-3. Shrink and dex bytecode to Dalvik API 19 format using `R8 --min-api 19` (`tools/proguard-rules.pro`).
-4. Bundle deflated (`ZIP_DEFLATED`) `libvlc.so`, `libvlcjni.so`, and `libc++_shared.so` into the APK.
-5. Zipalign and sign `Fitcamx.apk` with v1 JAR signatures (compatible with Android 4.4.2).
-6. Package and sign HMG-API and NEMESIS USB packages in `dist/`.
+The pipeline automatically:
+1. Provisions/caches `android-19/android.jar`, Build-Tools `30.0.3`, and `HMG-API` (persisted across cloud sessions).
+2. Generates `R.java` with `aapt` and compiles Java sources targeting Java 8 (`javac --release 8`).
+3. Shrinks and converts bytecode to Dalvik API 19 format using `R8 --min-api 19` (`tools/proguard-rules.pro`).
+4. Bundles deflated (`ZIP_DEFLATED`) `libvlc.so`, `libvlcjni.so`, and `libc++_shared.so` into the APK.
+5. Zipaligns and signs `Fitcamx.apk` with v1 JAR signatures (using production keys when configured, or ephemeral dev keys for local/PR testing).
+6. Packages and signs HMG-API and NEMESIS USB archives in `dist/`.
+
+### Cloud Signing Keys, Google Drive Sync & CI/CD
+- **Manage Production Signing Keys** (preserves seamless head-unit upgrades across releases):
+  ```bash
+  python3 tools/manage_keys.py status
+  python3 tools/manage_keys.py import --sync-github-secrets
+  ```
+- **Export Built Packages to Google Drive** (`FITCAMX Gen5W Builds`):
+  ```bash
+  ./build.sh --sync-gdrive
+  ```
+- **GitHub Actions CI & Releases:**
+  - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the full build and 119-check test suite on every push and pull request, uploading downloadable ZIP artifacts.
+  - [`.github/workflows/release.yml`](.github/workflows/release.yml) verifies production signing keys (`--require-release-keys`) on `v*.*.*` tags and publishes all 4 signed ZIP packages + `SHA256SUMS.txt` to GitHub Releases.
 
 ---
 
@@ -192,6 +202,9 @@ The script will:
 
 ```
 fitcamx/
+├── .github/workflows/
+│   ├── ci.yml                      # Automated build, unit test & binary invariant CI workflow
+│   └── release.yml                 # Production-signed GitHub Release publisher on v* tags
 ├── app/
 │   ├── AndroidManifest.xml         # Package definition, permissions, min/targetSdk 19
 │   ├── libs/
@@ -223,13 +236,16 @@ fitcamx/
 │   └── icons/                      # Head unit launcher icons
 ├── tools/
 │   ├── build_package.py            # Automated build, R8 dexing, alignment & signing pipeline
+│   ├── cloud_env.py                # Cloud SDK/HMG-API provisioning, cache & signing key resolver
+│   ├── manage_keys.py              # Persistent cloud key & GitHub Secrets management CLI
+│   ├── sync_gdrive.py              # Google Drive build package exporter
 │   ├── proguard-rules.pro          # R8 shrinking & API 19 Dalvik compatibility rules
-│   ├── setup_android_sdk.py        # Automated SDK setup helper
-│   └── sign.py                     # Standalone package signing utility
+│   ├── setup_android_sdk.py        # Cross-platform cached Android SDK setup helper
+│   └── sign.py                     # Standalone HMG-API & NEMESIS signing utility
 ├── tests/
 │   ├── run_tests.py                # Automated build, JVM unit test & binary invariant runner
 │   └── FitcamUnitTests.java        # Unit & mock-HTTP integration test suite
-├── dist/                           # Final signed release packages
+├── dist/                           # Generated release packages (gitignored; published via Releases/Drive)
 ├── AGENT_GUIDE.md                  # Comprehensive technical handbook for AI assistants & developers
 ├── DISCLAIMER.md                   # Detailed legal disclaimers, trademark & driver safety notices
 ├── LICENSE                         # AGPL-3.0 and third-party notices
