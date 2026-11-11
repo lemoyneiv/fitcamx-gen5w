@@ -18,8 +18,6 @@ jobs:
   build-and-verify:
     name: Build & Verify (API 19 / ARMv7 / HMG-API / NEMESIS)
     runs-on: ubuntu-latest
-    env:
-      FITCAMX_CACHE_DIR: ${{ runner.temp }}/fitcamx-toolchain-cache
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,7 +36,7 @@ jobs:
       - name: Cache Android SDK (API 19 + Build-Tools 30.0.3) & HMG-API
         uses: actions/cache@v4
         with:
-          path: ${{ env.FITCAMX_CACHE_DIR }}
+          path: ~/.cache/fitcamx-gen5w
           key: fitcamx-toolchain-${{ runner.os }}-api19-bt30.0.3-v1
 
       - name: Build APK, HMG-API & NEMESIS packages
