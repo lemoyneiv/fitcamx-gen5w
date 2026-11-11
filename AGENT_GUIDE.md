@@ -45,15 +45,17 @@ fitcamx/
 │   └── src/
 │       ├── fitcamx/app/
 │       │   ├── MainActivity.java        # Core lifecycle, UI views, tab switching, and button handlers
+│       │   ├── ThemeManager.java        # Material Design 3 tonal palette & API 19 shape/state-layer engine
 │       │   ├── CameraClient.java        # Novatek CGI protocol client & state sync engine
 │       │   ├── VlcPlayerManager.java    # Embedded LibVLC player, RTSP stream playback & surface lifecycle
 │       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover state machine
 │       │   ├── UsbDownloader.java       # Atomic (.part + fsync) SD-to-USB HTTP downloader
+│       │   ├── ScreenshotHelper.java    # USB-only root framebuffer capture & theme-aware BGRA/RGBA normalizer
 │       │   ├── TsHeaderSniffer.java     # MPEG-TS / M2TS & MP4/MOV codec header sniffer
 │       │   ├── XmlListParser.java       # Sanitized XML & fallback regex clip-list parser
 │       │   ├── HmgapidClient.java       # Root daemon IPC client (LFD1 protocol over abstract UNIX socket)
 │       │   ├── DebugLogger.java         # RAM-only diagnostics aggregator & USB exporter
-│       │   └── ClipItem.java            # Video clip metadata entity (filename, size, time, URL builder)
+│       │   └── ClipItem.java            # Video clip & still photo metadata entity
 │       └── main/jniLibs/armeabi-v7a/
 │           ├── libvlc.so                # LibVLC native engine (bundles FFmpeg / libavcodec)
 │           ├── libvlcjni.so             # LibVLC JNI glue layer
@@ -61,7 +63,8 @@ fitcamx/
 ├── mod/
 │   ├── mod.json                    # HMG-API mod manifest (version, apps, services, permissions)
 │   ├── svc/
-│   │   └── reboot.sh               # Root execution script for head unit reboot
+│   │   ├── reboot.sh               # Root execution script for head unit reboot
+│   │   └── screenshot.sh           # Root execution script for atomic USB-only framebuffer PNG capture
 │   └── icons/                      # 128x128 PNG icons for Gen5W launcher (active + disabled)
 ├── tools/
 │   ├── build_package.py            # Complete build pipeline: aapt -> javac -> R8 -> zipalign -> sign
@@ -100,19 +103,18 @@ In Android 4.4.2 KitKat, `SurfaceView` instances create dedicated hardware overl
 Telechips TCC803x has 4x ARM Cortex-A7 cores @ 1.0 GHz with NO hardware HEVC decoder in MediaCodec (only OMX.TCC.avcdec exists for H.264, which is prone to Stagefright deadlocks). All HEVC decoding must run in software via bundled FFmpeg (`libavcodec.so`).
 
 ```java
-ArrayList<String> options = new ArrayList<String>();
-options.add("--rtsp-tcp");              // Force TCP interleaved RTSP transport (cellular firewall bypass)
-options.add("--avcodec-threads=4");     // 4 dedicated worker threads for the 4 physical Cortex-A7 cores
-options.add("--avcodec-hw=none");       // Pure software NEON SIMD decoding (bypasses OMX.TCC.avcdec)
-options.add("--avcodec-fast");          // Fast IDCT and simplified motion compensation
-options.add("--no-stats");
-libVlc = new LibVLC(context, options);
+ArrayList<String> options = VlcPlayerManager.buildEngineOptions(mirrorHorizontal);
+// Includes: --rtsp-tcp, --avcodec-threads=4, --avcodec-hw=none, --avcodec-fast, --no-osd, --no-spu
+// Plus --video-filter=transform and --transform-type=hflip on mirrorLibVLC ONLY.
+// Note: Do NOT pass "--no-stats"; liveWatchdogRunnable reads IMedia.Stats to detect RTP/frame stalls.
 ```
 
 #### Per-Media Profiles & Playback Engine:
-`VlcPlayerManager` initializes a **single shared `LibVLC` instance asynchronously** off the main UI thread (`FitcamxVlcInit`) and applies per-media decoding options via `Media.addOption(...)`:
+`VlcPlayerManager` initializes **standard (`libVLC`) and horizontally-flipped (`mirrorLibVLC`) `LibVLC` instances asynchronously** off the main UI thread (`FitcamxVlcInit`) and applies per-media decoding options via `Media.addOption(...)`:
 - **Live Stream (`startLiveStream`):**
-  - Media options: `:rtsp-tcp`, `:network-caching=300`, `:clock-jitter=0`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`.
+  - **Horizontal Mirroring Invariant:** In VLC 3.0, `vout_thread_t` inherits `"video-filter"` and `"transform-type"` from `libvlc_media_player_t` → `LibVLC`, **NOT** from `input_thread_t` (`Media.addOption`). Live horizontal mirroring therefore binds `mirrorLivePlayer` (`mirrorLibVLC` with `--video-filter=transform` + `--transform-type=hflip`), while unmirrored Live View and SD Gallery playback bind `livePlayer` / `galleryPlayer` (`libVLC`).
+  - Media options (`buildLiveMediaOptions`): `:rtsp-tcp`, `:network-caching=300`, `:ipv4-timeout=5000`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`, `:clock-jitter=0`, `:clock-synchro=0`.
+  - **Keepalive & Anti-Freeze Self-Healing:** `MainActivity` dispatches idle Novatek `cmd=3016` heartbeats every 15s (`CameraClient.sendKeepaliveIfIdle`), while `VlcPlayerManager` polls `IMedia.Stats` (`readBytes`, `demuxReadBytes`, `decodedVideo`, `displayedPictures` via `didLiveStatsAdvance`, always calling `media.release()` in `finally`) every `250ms` with a `1200ms` stall threshold. **Never** reset `lastLiveProgressUptimeMs` on `Event.TimeChanged` or `PositionChanged` — VLC's monotonic `input_clock_t` continues firing `TimeChanged` for 10s while `live555` receives 0 RTP packets! Tier-1 recovery (`attempt == 1`) reconnects RTSP silently after `50ms` (`~170ms` connect time) without flashing `pbLiveLoading` or `"CONNECTING..."`.
   - *Note:* Live stream from Novatek is 720p/1080p H.264 (`rtsp://192.168.1.254/xxx.mov`), running smoothly with sub-second latency and automatic late-frame dropping if Wi-Fi jitters.
 - **1080p AVC Clips (`playGalleryClip` with `useKeyframeMode = false`):**
   - Always defaults to **1.0x full framerate** on each new clip, and allows cycling `1.0x` → `0.5x` → `0.33x` → `1.0x`.
@@ -120,7 +122,7 @@ libVlc = new LibVLC(context, options);
 - **4K / 1440p HEVC Clips (`playGalleryClip` with `useKeyframeMode = true`):**
   - Media options: `:no-audio`, `:ts-seek-percent`, `:no-ts-trust-pcr`, `:avcodec-skip-frame=3`, `:avcodec-skiploopfilter=4`, `:avcodec-hurry-up=1`, `:avcodec-threads=4`, `:avcodec-fast=1`.
   - **Rate Dilation (`0.33x` default, user-toggleable `0.33x` ↔ `0.5x`; `1.0x` disallowed):** `player.setRate(0.33f)` dilates presentation clock time by 3x so the 1.0 GHz Cortex-A7 CPU has ample wall-clock time to decode and render each HEVC keyframe without tripping VLC's lateness watchdog.
-  - **Overlaid Scrub Bar (`layout_gallery_seek_overlay`):** Composites inside `frame_gallery_container` above the `SurfaceView` punch-through layer without shrinking video bounds, auto-hiding after 3.5s of playback (tap video to toggle).
+  - **Floating Smoked-Glass Overlays (`layout_gallery_top_overlay` & `layout_gallery_seek_overlay`):** Both the top action bar and bottom scrub/status card composite inside `frame_gallery_container` above the `SurfaceView` punch-through layer without shrinking video bounds (`1026×578` with clip list open; `1120×630` across the full `630px` app height with clip list hidden), auto-hiding after 3.5s of playback or photo display (tap viewport to toggle).
   - *Note:* Always call `media.setHWDecoderEnabled(false, false)` to avoid Stagefright OMX crashes on KitKat.
 
 ---
@@ -142,23 +144,20 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 | **Snapshot Capture** | `?custom=1&cmd=2017` | Video Snapshot (while recording) | Captures photo without stopping movie recording |
 | | `?custom=1&cmd=1001` | Photo Capture (fallback) | Used if recording is stopped |
 | **Emergency Lock** | `?custom=1&cmd=2011&par=3` | Protect current recording | Flags recording as locked |
-| **Camera Settings Sync** | `?custom=1&cmd=3014` | Query All Camera Settings | Returns XML/HTML list of current parameters |
-| **Set System Clock** | `?custom=1&cmd=3015&par=YYYY-MM-DD HH:MM:SS` | Sync RTC Clock | Sets camera internal clock to car clock |
-| **Heartbeat / Ping** | `?custom=1&cmd=3016` | Keepalive Ping | Keeps camera Wi-Fi module active |
-| **Directory Query** | `?custom=1&cmd=3023` | List Recorded Clips on SD Card | Returns XML document with filenames and attributes |
+| **Live Stream Control** | `?custom=1&cmd=2015&par=0` / `par=1` | Stop / Start Live View | Enables or stops RTSP encoder output |
+| **Live Stream URL Query** | `?custom=1&cmd=2019` | Query Active RTSP URL | Returns `<MovieLiveViewLink>rtsp://192.168.1.254/xxx.mov</MovieLiveViewLink>` |
+| **Live Channel Switch** | `?custom=1&cmd=3028&par=0\|1\|2` | Switch Live Camera Feed | `0`=Front, `1`=Rear, `2`=Dual PiP (non-disruptive while recording) |
+| **Camera Settings Sync** | `?custom=1&cmd=3014` | Query All Camera Settings | Returns XML list of current parameters |
+| **Set System Clock** | `?custom=1&cmd=3005&str=YYYY-MM-DD` + `cmd=3006&str=HH:MM:SS` | Sync RTC Date & Time | Sets camera internal clock to car clock |
+| **Directory Query** | `?custom=1&cmd=3015` | List Recorded Media on SD Card | Returns XML `<ALLFile>` index (`Movie`, `EMR`, `PHOTO`) |
+| **Heartbeat / Ping** | `?custom=1&cmd=3016` | Keepalive Ping | Keeps camera Wi-Fi & RTSP session active (sent every 15s when idle) |
 | **Firmware Info** | `?custom=1&cmd=3504` | Query Hardware / Firmware Info | Returns chipset and firmware string |
 
 ### RTSP Stream Endpoints
-- **Front Feed:**
-  1. `rtsp://192.168.1.254:554/264_pcm_rt/live.fhd` (Primary)
-  2. `rtsp://192.168.1.254:554/264_pcm_rt/front.fhd`
-  3. `rtsp://192.168.1.254:554/liveRTSP/v1`
-  4. `rtsp://192.168.1.254:554/liveRTSP/av4`
-- **Rear Feed:**
-  1. `rtsp://192.168.1.254:554/264_pcm_rt/rear.fhd` (Primary)
-  2. `rtsp://192.168.1.254:554/264_pcm_rt/rear.mov`
-  3. `rtsp://192.168.1.254:554/liveRTSP/v2`
-  4. `rtsp://192.168.1.254:554/liveRTSP/av2`
+- **Primary Dynamic Endpoint (via `cmd=2019`):** `rtsp://192.168.1.254/xxx.mov` (live camera channel selected via `cmd=3028&par=0|1|2`)
+- **Fallback Candidate Endpoints:**
+  - Front: `rtsp://192.168.1.254:554/264_pcm_rt/live.fhd`, `.../front.fhd`, `.../liveRTSP/v1`, `.../liveRTSP/av4`
+  - Rear: `rtsp://192.168.1.254:554/264_pcm_rt/rear.fhd`, `.../rear.mov`, `.../liveRTSP/v2`, `.../liveRTSP/av2`
 
 ---
 
@@ -166,6 +165,8 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 
 The Gen5W head unit has a single physical Wi-Fi chipset. It cannot run in concurrent SoftAP (Hotspot for wireless projection) and Station (Client) mode.
 - **Fast Reconnect & Zero-Wear Profile Retention:** Once a dashcam is verified over HTTP, its identity (`ssid`, `ip`, `soc`, `port`) is persisted strictly once on change, and its `wpa_supplicant` `WifiConfiguration` (`priority=100`, pure WPA2-CCMP when `[WPA2-PSK-CCMP]` is advertised) is retained across exits (disabled in RAM on teardown rather than removed/re-saved on every launch). On subsequent launches, `WIFI_STATE_ENABLED` associates directly with the saved `networkId` without waiting for a full scan or colliding with background networks, begins `150ms` DHCP polling immediately upon `SupplicantState.COMPLETED`, and falls back to active scanning if the camera is absent or replaced.
+- **Custom Password & Manual SSID Fallback:** `WifiBridge` detects explicit `ERROR_AUTHENTICATING`, Broadcom `bcmdhd` KitKat `FOUR_WAY_HANDSHAKE -> DISCONNECTED` PSK rejections, exhausted association watchdogs, and missing standard SSIDs (`NO_MATCH_PROMPT_SCAN_THRESHOLD`), pausing auto-retries on rejected SSIDs and invoking `Listener.onManualSetupNeeded(...)`. User-supplied passwords are persisted per SSID (`pwd_<ssid>`) strictly on change and preserved even if cached camera identity is cleared.
+- **SoftAP Mode 2 Restoration Order:** On Gen5W Broadcom `bcmdhd`, `setWifiApEnabledForConnectivity(conf, true)` (Mode 2) fails if client `wpa_supplicant` is still active. `restoreWifiStateInternal()` always calls `wm.setWifiEnabled(false)` **before** re-enabling SoftAP, and retains `initialStateRecorded` across temporary background suspends so final `Exit` still knows the true pre-launch AP state.
 ```
                       [ User Launches FITCAMX ]
                                   │
@@ -261,10 +262,10 @@ python3 tests/run_tests.py
 4. Executes `zipalign -f 4`.
 5. Signs `Fitcamx.apk` with `apksigner` using a 2048-bit RSA keystore (strictly v1 JAR signature: `--v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false`).
 6. Stages the mod directory, invokes `sign.py` with ECDSA SHA256 author keys, and outputs:
-   - `dist/fitcamx-gen5w-v0.6.0.hmgapi.zip`
-   - `dist/fitcamx-gen5w-v0.6.0-hmgapi-usb.zip`
-   - `dist/fitcamx-gen5w-v0.6.0-nemesis-usb.zip`
-   - `dist/fitcamx-gen5w-v0.6.0-nemesis-package.zip`
+   - `dist/fitcamx-gen5w-v0.7.0.hmgapi.zip`
+   - `dist/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip`
+   - `dist/fitcamx-gen5w-v0.7.0-nemesis-usb.zip`
+   - `dist/fitcamx-gen5w-v0.7.0-nemesis-package.zip`
 
 ---
 

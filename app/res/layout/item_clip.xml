@@ -1,27 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/layout_clip_row_root"
     android:layout_width="match_parent"
-    android:layout_height="64dp"
+    android:layout_height="wrap_content"
+    android:minHeight="58dp"
     android:orientation="horizontal"
     android:gravity="center_vertical"
-    android:paddingLeft="14dp"
-    android:paddingRight="14dp"
-    android:background="?android:attr/selectableItemBackground">
+    android:paddingLeft="12dp"
+    android:paddingRight="10dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp">
 
-    <!-- Camera Tag Badge (Front / Rear - Clean colored text, no background box) -->
-    <TextView
-        android:id="@+id/tv_cam_badge"
-        android:layout_width="48dp"
-        android:layout_height="wrap_content"
-        android:gravity="left|center_vertical"
-        android:background="@android:color/transparent"
-        android:text="FRONT"
-        android:textColor="@color/accent_blue"
-        android:textSize="12sp"
-        android:textStyle="bold"
-        android:layout_marginRight="10dp" />
-
-    <!-- Name & Timestamp -->
+    <!-- Left: Single-Line Filename + Metadata Strip -->
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
@@ -30,56 +20,81 @@
 
         <TextView
             android:id="@+id/tv_clip_filename"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="2026_1107_120000_001F.MP4"
+            android:singleLine="true"
+            android:ellipsize="middle"
+            android:text="2026_1107_120000_001F.TS"
             android:textColor="@color/text_primary"
-            android:textSize="15sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
-        <TextView
-            android:id="@+id/tv_clip_time"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="2026/11/07 12:00:00"
-            android:textColor="@color/text_secondary"
-            android:textSize="12sp"
-            android:layout_marginTop="2dp" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="3dp">
+
+            <!-- Clean colored text badge (FRONT / REAR) -->
+            <TextView
+                android:id="@+id/tv_cam_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="FRONT"
+                android:textColor="@color/accent_blue"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:layout_marginRight="8dp" />
+
+            <!-- Optional Status Badge (LOCKED / PHOTO) -->
+            <TextView
+                android:id="@+id/tv_lock_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="LOCKED"
+                android:textColor="@color/accent_red"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:layout_marginRight="8dp"
+                android:visibility="gone" />
+
+            <!-- File Size -->
+            <TextView
+                android:id="@+id/tv_clip_size"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="145 MB"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:layout_marginRight="8dp" />
+
+            <!-- Timestamp -->
+            <TextView
+                android:id="@+id/tv_clip_time"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:text="2026/11/07 12:00:00"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
     </LinearLayout>
 
-    <!-- Type / Lock Status Badge (Clean colored text, no background box) -->
-    <TextView
-        android:id="@+id/tv_lock_badge"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:background="@android:color/transparent"
-        android:text="LOCKED"
-        android:textColor="@color/accent_red"
-        android:textSize="11sp"
-        android:textStyle="bold"
-        android:layout_marginRight="12dp"
-        android:visibility="gone" />
-
-    <!-- File Size -->
-    <TextView
-        android:id="@+id/tv_clip_size"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="145 MB"
-        android:textColor="@color/text_secondary"
-        android:textSize="13sp" />
-
-    <!-- Direct Save to USB Button -->
+    <!-- Right: M3 Pill USB Save Button -->
     <Button
         android:id="@+id/btn_item_download"
+        style="@style/M3PillButton"
         android:layout_width="wrap_content"
-        android:layout_height="36dp"
-        android:layout_marginLeft="12dp"
+        android:layout_height="32dp"
+        android:layout_marginLeft="8dp"
         android:paddingLeft="12dp"
         android:paddingRight="12dp"
-        android:background="@color/accent_green"
-        android:text="Save to USB"
-        android:textColor="#ffffff"
+        android:background="@color/bg_button"
+        android:text="USB"
+        android:textColor="@color/accent_blue"
         android:textSize="12sp"
         android:textStyle="bold"
         android:focusable="false"

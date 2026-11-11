@@ -732,6 +732,34 @@ public class FitcamUnitTests {
               ((corrected >>> 24) & 0xFF) == 0xFF && r == 21 && g == 95 && b == 157);
         check("shouldSwapRedBlue returns false on already true-blue RGBA screenshots (idempotent)",
               !ScreenshotHelper.shouldSwapRedBlue(img, w, h, 4, 2, 24, 12));
+
+        // Verify theme-aware shouldSwapRedBlue across all 6 Material 3 curated palettes (including warm R>B palettes)
+        boolean allThemesDetectedSwap = true;
+        boolean allThemesIdempotentAfterSwap = true;
+        for (ThemeManager.Palette p : ThemeManager.getPalettes()) {
+            int[] themedImg = new int[w * h];
+            Arrays.fill(themedImg, p.surfaceContainerLow);
+            int expR = (p.primary >>> 16) & 0xFF;
+            int expG = (p.primary >>> 8) & 0xFF;
+            int expB = p.primary & 0xFF;
+            int bgraSwappedGlyph = 0xFF000000 | (expB << 16) | (expG << 8) | expR;
+            for (int y = 2; y < 12; y++) {
+                for (int x = 4; x < 24; x++) {
+                    themedImg[y * w + x] = bgraSwappedGlyph;
+                }
+            }
+            if (!ScreenshotHelper.shouldSwapRedBlue(themedImg, w, h, 4, 2, 24, 12, p.primary)) {
+                allThemesDetectedSwap = false;
+            }
+            ScreenshotHelper.swapRedBlueInPlace(themedImg);
+            if (ScreenshotHelper.shouldSwapRedBlue(themedImg, w, h, 4, 2, 24, 12, p.primary)) {
+                allThemesIdempotentAfterSwap = false;
+            }
+        }
+        check("Theme-aware shouldSwapRedBlue detects BGRA swap across all 6 M3 themes (cool & warm R>B)",
+              allThemesDetectedSwap);
+        check("Theme-aware shouldSwapRedBlue is idempotent on normal RGBA across all 6 M3 themes",
+              allThemesIdempotentAfterSwap);
     }
 
     private static void testGalleryBufferingAndSpinnerPolicy() {
@@ -755,6 +783,152 @@ public class FitcamUnitTests {
               && !VlcPlayerManager.shouldClearSpinnerOnProgress(true, false, 0L, 2000L));
     }
 
+    private static void testMaterial3ThemeEngine() {
+        System.out.println("\n--- 11. Material 3 Curated Theme Engine & WCAG Contrast Verification ---");
+        ThemeManager.Palette[] palettes = ThemeManager.getPalettes();
+        check("Curated M3 palette catalog contains exactly 6 themes with Ocean Blue default",
+              palettes.length == 6 && ThemeManager.ID_OCEAN_BLUE.equals(ThemeManager.getDefaultPalette().id));
+
+        // Verify full cyclic traversal via nextPaletteId
+        Set<String> visited = new HashSet<String>();
+        String cur = ThemeManager.ID_OCEAN_BLUE;
+        for (int i = 0; i < palettes.length; i++) {
+            visited.add(cur);
+            cur = ThemeManager.nextPaletteId(cur);
+        }
+        check("nextPaletteId cycles cleanly through all 6 unique palettes and wraps back to Ocean Blue",
+              visited.size() == 6 && ThemeManager.ID_OCEAN_BLUE.equals(cur));
+
+        check("getPaletteById falls back safely to Ocean Blue on null or unknown ID",
+              ThemeManager.ID_OCEAN_BLUE.equals(ThemeManager.getPaletteById(null).id)
+              && ThemeManager.ID_OCEAN_BLUE.equals(ThemeManager.getPaletteById("nonexistent_theme").id));
+
+        // WCAG contrast checks across all 6 palettes for automotive legibility
+        boolean contrastOk = true;
+        String worstPair = "";
+        for (ThemeManager.Palette p : palettes) {
+            double cSurface = ThemeManager.contrastRatio(p.onSurface, p.surface);
+            double cPrimary = ThemeManager.contrastRatio(p.onPrimary, p.primary);
+            double cSecondary = ThemeManager.contrastRatio(p.onSecondaryContainer, p.secondaryContainer);
+            double cTertiary = ThemeManager.contrastRatio(p.onTertiaryContainer, p.tertiaryContainer);
+            double cError = ThemeManager.contrastRatio(p.onErrorContainer, p.errorContainer);
+            if (cSurface < 4.5 || cPrimary < 4.5 || cSecondary < 4.5 || cTertiary < 4.5 || cError < 4.5) {
+                contrastOk = false;
+                worstPair = p.id + " (surf=" + cSurface + ", prim=" + cPrimary + ", sec=" + cSecondary + ")";
+            }
+        }
+        check("All 6 M3 palettes satisfy WCAG AA (>= 4.5:1) contrast across surface, primary, secondary, tertiary & error roles"
+              + (worstPair.isEmpty() ? "" : " [" + worstPair + "]"),
+              contrastOk);
+
+        // State-layer blend & alpha helpers
+        int alphaApplied = ThemeManager.withAlpha(0xFF9ECAFF, 128);
+        int midBlend = ThemeManager.blendArgb(0xFF000000, 0xFFFFFFFF, 0.5f);
+        check("ThemeManager.withAlpha & blendArgb compute accurate ARGB state-layer colors",
+              alphaApplied == 0x809ECAFF
+              && ((midBlend >>> 24) & 0xFF) == 0xFF
+              && Math.abs(((midBlend >>> 16) & 0xFF) - 128) <= 1);
+    }
+
+    private static void testLiveWatchdogKeepaliveAndMirrorOptions() {
+        System.out.println("\n--- 12. Live Stream Watchdog, Novatek Keepalive & Horizontal Mirror Options ---");
+        check("isLiveStreamStalled ignores pre-playback state and healthy <1.2s intervals",
+              VlcPlayerManager.LIVE_STALL_TIMEOUT_MS == 1200L
+              && VlcPlayerManager.LIVE_WATCHDOG_POLL_MS == 250L
+              && !VlcPlayerManager.isLiveStreamStalled(false, 1000L, 9000L, VlcPlayerManager.LIVE_STALL_TIMEOUT_MS)
+              && !VlcPlayerManager.isLiveStreamStalled(true, 1000L, 2199L, VlcPlayerManager.LIVE_STALL_TIMEOUT_MS));
+        check("isLiveStreamStalled detects frozen stream once >=1200ms elapse without RTP/frame progress",
+              VlcPlayerManager.isLiveStreamStalled(true, 1000L, 2200L, VlcPlayerManager.LIVE_STALL_TIMEOUT_MS));
+
+        check("didLiveStatsAdvance rejects all-zero initial stats and unchanged stalled counters while accepting real RTP/frame advances",
+              !VlcPlayerManager.didLiveStatsAdvance(0, 0, 0, 0, 0, 0, 0, 0)
+              && !VlcPlayerManager.didLiveStatsAdvance(0, 48000, 120, 118, 0, 48000, 120, 118)
+              && VlcPlayerManager.didLiveStatsAdvance(0, 48000, 120, 118, 0, 52096, 120, 118)
+              && VlcPlayerManager.didLiveStatsAdvance(0, 48000, 120, 118, 0, 48000, 121, 118)
+              && VlcPlayerManager.didLiveStatsAdvance(0, 48000, 120, 118, 0, 48000, 120, 119)
+              && VlcPlayerManager.didLiveStatsAdvance(1024, 0, 0, 0, 2048, 0, 0, 0));
+
+        check("isLiveOpenTimedOut detects hung RTSP Opening state >=8500ms and ignores playing streams",
+              !VlcPlayerManager.isLiveOpenTimedOut(false, 1000L, 9400L, VlcPlayerManager.LIVE_OPEN_TIMEOUT_MS)
+              && VlcPlayerManager.isLiveOpenTimedOut(false, 1000L, 9500L, VlcPlayerManager.LIVE_OPEN_TIMEOUT_MS)
+              && !VlcPlayerManager.isLiveOpenTimedOut(true, 1000L, 25000L, VlcPlayerManager.LIVE_OPEN_TIMEOUT_MS));
+
+        List<String> stdEngineOpts = VlcPlayerManager.buildEngineOptions(false);
+        List<String> mirrorEngineOpts = VlcPlayerManager.buildEngineOptions(true);
+        check("buildEngineOptions(false) configures software NEON decode with --no-osd/--no-spu and omits transform filter",
+              stdEngineOpts.contains("--rtsp-tcp")
+              && stdEngineOpts.contains("--avcodec-hw=none")
+              && stdEngineOpts.contains("--no-osd")
+              && stdEngineOpts.contains("--no-spu")
+              && !stdEngineOpts.contains("--video-filter=transform")
+              && !stdEngineOpts.contains("--transform-type=hflip"));
+        check("buildEngineOptions(true) configures LibVLC-level --video-filter=transform & --transform-type=hflip inherited by vout_thread_t",
+              mirrorEngineOpts.contains("--video-filter=transform")
+              && mirrorEngineOpts.contains("--transform-type=hflip")
+              && mirrorEngineOpts.contains("--no-osd")
+              && mirrorEngineOpts.contains("--no-spu"));
+
+        List<String> mediaOpts = VlcPlayerManager.buildLiveMediaOptions(true);
+        check("buildLiveMediaOptions configures low-latency TCP RTSP caching without dead input-level video-filter flags",
+              mediaOpts.contains(":rtsp-tcp")
+              && mediaOpts.contains(":network-caching=300")
+              && mediaOpts.contains(":ipv4-timeout=5000")
+              && !mediaOpts.contains(":video-filter=transform"));
+
+        check("CameraClient.shouldSendKeepalive fires on 12s idle Novatek sessions outside teardown",
+              CameraClient.KEEPALIVE_MIN_IDLE_MS == 12000L
+              && CameraClient.shouldSendKeepalive(true, false, 0L, 5000L, CameraClient.KEEPALIVE_MIN_IDLE_MS)
+              && !CameraClient.shouldSendKeepalive(true, false, 10000L, 21000L, CameraClient.KEEPALIVE_MIN_IDLE_MS)
+              && CameraClient.shouldSendKeepalive(true, false, 10000L, 22500L, CameraClient.KEEPALIVE_MIN_IDLE_MS)
+              && !CameraClient.shouldSendKeepalive(true, true, 1000L, 50000L, CameraClient.KEEPALIVE_MIN_IDLE_MS)
+              && !CameraClient.shouldSendKeepalive(false, false, 1000L, 50000L, CameraClient.KEEPALIVE_MIN_IDLE_MS));
+
+        check("Per-view mirror preference keys & live badge labels isolate Front, Rear, and Dual modes",
+              "mirror_front".equals(MainActivity.getMirrorPrefKey(CameraClient.VIEW_FRONT))
+              && "mirror_rear".equals(MainActivity.getMirrorPrefKey(CameraClient.VIEW_REAR))
+              && "mirror_dual".equals(MainActivity.getMirrorPrefKey(CameraClient.VIEW_DUAL))
+              && "REAR \u00B7 MIRROR (LIVE)".equals(MainActivity.formatLiveStreamBadge("REAR", true, "LIVE"))
+              && "FRONT (LIVE)".equals(MainActivity.formatLiveStreamBadge("FRONT", false, "LIVE")));
+
+        check("computeLiveRecoveryDelayMs & isSilentLiveRefresh run silent 50ms Tier-1 RTSP refresh before escalating",
+              MainActivity.computeLiveRecoveryDelayMs(1) == 50L
+              && MainActivity.computeLiveRecoveryDelayMs(2) == 400L
+              && MainActivity.computeLiveRecoveryDelayMs(3) == 1000L
+              && MainActivity.computeLiveRecoveryDelayMs(5) == 2500L
+              && MainActivity.isSilentLiveRefresh(1)
+              && !MainActivity.isSilentLiveRefresh(2));
+    }
+
+    private static void testWifiCustomPasswordAndManualFallback() {
+        System.out.println("\n--- 13. WifiBridge Custom Password Validation & Manual SSID Fallback ---");
+        check("isValidWifiPassword enforces 8..63 ASCII or 64-hex WPA PSK and allows empty on Open networks",
+              WifiBridge.isValidWifiPassword("", WifiBridge.SEC_OPEN)
+              && !WifiBridge.isValidWifiPassword("", WifiBridge.SEC_WPA2_CCMP)
+              && !WifiBridge.isValidWifiPassword("1234567", WifiBridge.SEC_WPA2_CCMP)
+              && WifiBridge.isValidWifiPassword("MyCustomCamPass!", WifiBridge.SEC_WPA2_CCMP)
+              && WifiBridge.isValidWifiPassword("0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF", WifiBridge.SEC_WPA2_CCMP)
+              && !WifiBridge.isValidWifiPassword("0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEG", WifiBridge.SEC_WPA2_CCMP));
+
+        String rawHex64 = "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF";
+        check("formatPreSharedKey quotes ASCII passphrases safely while keeping 64-hex keys unquoted",
+              "\"Custom8888\"".equals(WifiBridge.formatPreSharedKey("Custom8888"))
+              && "\"Pass\\\"WithQuote\"".equals(WifiBridge.formatPreSharedKey("Pass\"WithQuote"))
+              && rawHex64.equals(WifiBridge.formatPreSharedKey(rawHex64)));
+
+        check("shouldTriggerAuthFallback triggers on explicit auth errors, WPA handshake drops, or exhausted retries",
+              !WifiBridge.shouldTriggerAuthFallback(1, 1, 2)
+              && WifiBridge.shouldTriggerAuthFallback(2, 0, 0)
+              && WifiBridge.shouldTriggerAuthFallback(0, 2, 0)
+              && WifiBridge.shouldTriggerAuthFallback(0, 0, WifiBridge.MAX_ASSOC_WATCHDOG_RETRIES));
+
+        List<String> rawScan = Arrays.asList("Home_5G", "CoffeeShop", "CAR_CAM_CM703_7bf6", "MyCustomCam", "home_5g");
+        List<String> ordered = WifiBridge.prioritizeSsidsForPicker(rawScan, "MyCustomCam", "");
+        check("prioritizeSsidsForPicker deduplicates SSIDs and pins failed & dashcam SSIDs to the top",
+              ordered.size() == 4
+              && "MyCustomCam".equals(ordered.get(0))
+              && "CAR_CAM_CM703_7bf6".equals(ordered.get(1)));
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== FITCAMX Gen5W Automated Java Unit & Integration Test Suite ===\n");
         testDebugLoggerRamOnly();
@@ -767,6 +941,9 @@ public class FitcamUnitTests {
         testWifiFastConnectHelpers();
         testScreenshotColorNormalizer();
         testGalleryBufferingAndSpinnerPolicy();
+        testMaterial3ThemeEngine();
+        testLiveWatchdogKeepaliveAndMirrorOptions();
+        testWifiCustomPasswordAndManualFallback();
 
         System.out.println("\n=== Java Test Summary: " + passed + " passed, " + failed + " failed ===");
         if (failed > 0) {

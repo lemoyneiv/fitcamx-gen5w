@@ -43,7 +43,7 @@ public class DebugLogger {
     };
 
     private static final LinkedList<String> logBuffer = new LinkedList<String>();
-    private static volatile String appVersion = "0.6.1";
+    private static volatile String appVersion = "0.7.0";
 
     public static String getAppVersion() {
         return appVersion;

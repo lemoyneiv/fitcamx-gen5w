@@ -25,6 +25,7 @@ logs/
 *.log
 fitcamx_debug_log*.txt
 fitcamx_log_*.txt
+/fitcamx_screenshot_*.png
 
 # IDE / Editor configuration
 .idea/

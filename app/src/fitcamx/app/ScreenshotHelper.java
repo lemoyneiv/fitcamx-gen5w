@@ -8,6 +8,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.View;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
@@ -37,19 +38,31 @@ import java.util.concurrent.atomic.AtomicReference;
 public class ScreenshotHelper {
     private static final AtomicBoolean CAPTURING = new AtomicBoolean(false);
     private static final long HMGAPID_POLL_INTERVAL_MS = 120L;
-    private static final long HMGAPID_TIMEOUT_MS = 3800L;
+    private static final long HMGAPID_TIMEOUT_MS = 8000L;
+    private static final long HMGAPID_MAX_INFLIGHT_MS = 14000L;
 
     public interface CompletionListener {
         void onComplete(File savedFile, String errorMessage);
     }
 
     /**
-     * Pure pixel detector for Telechips TCC803x /system/bin/screencap BGRA <-> RGBA channel swap.
-     * Examines the FITCAMX title ROI (which is rendered in @color/accent_blue #2196F3, B >> R).
-     * Returns true ONLY when strongly orange-shifted pixels (R >> B, R > G) clearly dominate.
+     * Pure pixel detector for Telechips TCC803x /system/bin/screencap BGRA <-> RGBA channel swap
+     * using default blue FITCAMX title expectation (retained for compatibility).
      */
     public static boolean shouldSwapRedBlue(int[] argbPixels, int imgWidth, int imgHeight,
                                             int roiLeft, int roiTop, int roiRight, int roiBottom) {
+        return shouldSwapRedBlue(argbPixels, imgWidth, imgHeight, roiLeft, roiTop, roiRight, roiBottom, 0xFF155F9D);
+    }
+
+    /**
+     * Theme-aware pixel detector for Telechips TCC803x /system/bin/screencap BGRA <-> RGBA swap.
+     * Compares foreground glyph pixels inside the FITCAMX title ROI against the active theme's
+     * expected RGB color vs its R<->B swapped counterpart, working accurately across cool
+     * (Ocean Blue, Ioniq Teal, M3 Violet, Daylight) and warm (Kia Crimson, Genesis Copper) themes.
+     */
+    public static boolean shouldSwapRedBlue(int[] argbPixels, int imgWidth, int imgHeight,
+                                            int roiLeft, int roiTop, int roiRight, int roiBottom,
+                                            int expectedArgbColor) {
         if (argbPixels == null || imgWidth <= 0 || imgHeight <= 0) return false;
         if (argbPixels.length < imgWidth * imgHeight) return false;
 
@@ -58,6 +71,13 @@ public class ScreenshotHelper {
         int top = Math.max(0, Math.min(imgHeight, roiTop));
         int bottom = Math.max(0, Math.min(imgHeight, roiBottom));
         if (right <= left || bottom <= top) return false;
+
+        int expR = (expectedArgbColor >>> 16) & 0xFF;
+        int expG = (expectedArgbColor >>> 8) & 0xFF;
+        int expB = expectedArgbColor & 0xFF;
+        if (Math.abs(expR - expB) < 25) {
+            return false;
+        }
 
         int swappedVotes = 0;
         int normalVotes = 0;
@@ -72,10 +92,24 @@ public class ScreenshotHelper {
                 int g = (p >>> 8) & 0xFF;
                 int b = p & 0xFF;
 
-                if (r - b >= 35 && r > g) {
-                    swappedVotes++;
-                } else if (b - r >= 35 && b > g) {
-                    normalVotes++;
+                int drN = r - expR;
+                int dgN = g - expG;
+                int dbN = b - expB;
+                int dNormal = drN * drN + dgN * dgN + dbN * dbN;
+
+                int drS = r - expB;
+                int dgS = g - expG;
+                int dbS = b - expR;
+                int dSwapped = drS * drS + dgS * dgS + dbS * dbS;
+
+                // Only count pixels close to either expected foreground glyph color or its R<->B swap
+                int minDist = Math.min(dNormal, dSwapped);
+                if (minDist <= 9500) {
+                    if (dSwapped + 1000 < dNormal) {
+                        swappedVotes++;
+                    } else if (dNormal + 1000 < dSwapped) {
+                        normalVotes++;
+                    }
                 }
             }
         }
@@ -107,11 +141,14 @@ public class ScreenshotHelper {
 
         final Handler uiHandler = new Handler(Looper.getMainLooper());
 
-        // Record screen-space ROI of the blue "FITCAMX" title view on the UI thread
+        // Record screen-space ROI and active theme color of the "FITCAMX" title view on UI thread
         final int roiLeft;
         final int roiTop;
         final int roiRight;
         final int roiBottom;
+        final int expectedTitleColor = (blueTitleAnchor instanceof TextView)
+                ? ((TextView) blueTitleAnchor).getCurrentTextColor()
+                : 0xFF9ECAFF;
         if (blueTitleAnchor != null && blueTitleAnchor.getWidth() > 0 && blueTitleAnchor.getHeight() > 0) {
             int[] loc = new int[2];
             blueTitleAnchor.getLocationOnScreen(loc);
@@ -155,7 +192,8 @@ public class ScreenshotHelper {
                     if (hmgapidStarted) {
                         savedFile = waitForHmgapidScreenshot(usbFolder, existingNames, triggerWallMs);
                         if (savedFile != null) {
-                            normalizeScreenshotColorsIfNeeded(savedFile, roiLeft, roiTop, roiRight, roiBottom);
+                            normalizeScreenshotColorsIfNeeded(
+                                    savedFile, roiLeft, roiTop, roiRight, roiBottom, expectedTitleColor);
                             DebugLogger.log("SCREENSHOT", "Saved root framebuffer screenshot to USB: "
                                     + savedFile.getAbsolutePath() + " (" + savedFile.length() + " bytes)");
                         }
@@ -209,7 +247,9 @@ public class ScreenshotHelper {
     }
 
     private static File waitForHmgapidScreenshot(File usbFolder, Set<String> existingNames, long triggerWallMs) {
-        long deadline = SystemClock.elapsedRealtime() + HMGAPID_TIMEOUT_MS;
+        long startElapsed = SystemClock.elapsedRealtime();
+        long maxDeadline = startElapsed + HMGAPID_MAX_INFLIGHT_MS;
+        long deadline = startElapsed + HMGAPID_TIMEOUT_MS;
         while (SystemClock.elapsedRealtime() < deadline) {
             try {
                 Thread.sleep(HMGAPID_POLL_INTERVAL_MS);
@@ -244,12 +284,17 @@ public class ScreenshotHelper {
             if (candidate != null && !partInFlight && candidate.length() > 0L) {
                 return candidate;
             }
+            if (partInFlight) {
+                // Root screencap is actively compressing/flushing to FAT32 USB (can take 4-5s during 4K HEVC decode)
+                deadline = Math.min(maxDeadline, Math.max(deadline, SystemClock.elapsedRealtime() + 2500L));
+            }
         }
         return null;
     }
 
     private static void normalizeScreenshotColorsIfNeeded(File pngFile,
-                                                          int roiLeft, int roiTop, int roiRight, int roiBottom) {
+                                                          int roiLeft, int roiTop, int roiRight, int roiBottom,
+                                                          int expectedTitleColor) {
         if (pngFile == null || !pngFile.exists() || roiRight <= roiLeft || roiBottom <= roiTop) {
             return;
         }
@@ -268,7 +313,7 @@ public class ScreenshotHelper {
 
             int[] pixels = new int[w * h];
             bmp.getPixels(pixels, 0, w, 0, 0, w, h);
-            if (!shouldSwapRedBlue(pixels, w, h, roiLeft, roiTop, roiRight, roiBottom)) {
+            if (!shouldSwapRedBlue(pixels, w, h, roiLeft, roiTop, roiRight, roiBottom, expectedTitleColor)) {
                 return;
             }
 
@@ -328,10 +373,16 @@ public class ScreenshotHelper {
                         int w = decor.getWidth();
                         int h = decor.getHeight();
                         if (w > 0 && h > 0) {
-                            Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-                            Canvas canvas = new Canvas(bmp);
-                            decor.draw(canvas);
-                            bitmapRef.set(bmp);
+                            Bitmap raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                            Canvas rawCanvas = new Canvas(raw);
+                            decor.draw(rawCanvas);
+                            // SurfaceView.draw() punches PorterDuff.Mode.CLEAR holes; composite onto opaque black
+                            Bitmap opaque = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                            Canvas outCanvas = new Canvas(opaque);
+                            outCanvas.drawColor(0xFF000000);
+                            outCanvas.drawBitmap(raw, 0f, 0f, null);
+                            raw.recycle();
+                            bitmapRef.set(opaque);
                         }
                     }
                 } catch (Throwable ignored) {

@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.wifi.ScanResult;
@@ -13,16 +14,22 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.text.InputType;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
@@ -53,25 +60,39 @@ public class MainActivity extends Activity {
     private CameraClient cameraClient;
     private UsbDownloader usbDownloader;
 
-    // UI Elements - Top bar
+    // Active Material 3 Theme Palette
+    private ThemeManager.Palette activePalette = ThemeManager.getDefaultPalette();
+
+    // UI Elements - Root & Left Navigation Rail
+    private View layoutRoot;
+    private View layoutSidebar;
+    private View dividerSidebar;
     private View layoutLogoHeader;
     private TextView tvTitle;
+    private TextView tvAppVersion;
+    private View layoutWifiCard;
     private TextView tvWifiStatus;
     private Button btnRescan;
+    private TextView tvNavSectionLabel;
     private Button btnTabLive;
     private Button btnTabGallery;
+    private Button btnTheme;
     private Button btnExportLog;
     private Button btnExitApp;
 
     // Diagnostic bar
     private View layoutDiagBar;
     private TextView tvDiagInfo;
+    private TextView tvDiagTapHint;
 
     // VLC High-Performance Player Engine
     private VlcPlayerManager vlcPlayerManager;
 
     // Live Mode Elements
     private View layoutLiveMode;
+    private View dividerLiveControls;
+    private View layoutLiveControls;
+    private TextView tvCamControlsLabel;
     private SurfaceView surfaceLive;
     private Surface liveSurface = null;
     private boolean isStartingLive = false;
@@ -80,6 +101,7 @@ public class MainActivity extends Activity {
     private TextView tvStreamBadge;
     private TextView tvRecBadge;
     private Button btnToggleCam;
+    private Button btnMirrorLive;
     private Button btnSnapshot;
     private Button btnEmergencyLock;
     private Button btnToggleMic;
@@ -89,8 +111,11 @@ public class MainActivity extends Activity {
 
     // Gallery Mode Elements
     private View layoutGalleryMode;
+    private View dividerGalleryColumns;
     private View frameGalleryContainer;
+    private View layoutGalleryTopOverlay;
     private View layoutGallerySeekOverlay;
+    private View layoutSeekBarRow;
     private TextView tvSeekPosition;
     private ListView lvClips;
     private TextView tvClipCount;
@@ -120,6 +145,10 @@ public class MainActivity extends Activity {
     private Button btnToggleGalleryList;
 
     private static final long SEEK_OVERLAY_AUTO_HIDE_MS = 3500L;
+    private static final long LIVE_KEEPALIVE_INTERVAL_MS = 15000L;
+    private static final long LIVE_HEALTHY_RESET_MS = 8000L;
+    private static final long LIVE_SILENT_REFRESH_SPINNER_DELAY_MS = 900L;
+    private static final String PREFS_UI_SETTINGS = "fitcamx_ui_settings";
 
     // State
     private final Handler lifecycleHandler = new Handler(Looper.getMainLooper());
@@ -140,6 +169,18 @@ public class MainActivity extends Activity {
     private int currentViewMode = CameraClient.VIEW_FRONT; // 0=Front, 1=Rear, 2=Dual (Both)
     private int targetViewMode = CameraClient.VIEW_FRONT;
     private int activeStreamMode = CameraClient.VIEW_FRONT;
+    private final boolean[] mirrorByViewMode = new boolean[3];
+    private String activeLiveStreamUrl = null;
+    private int liveAutoReconnectCount = 0;
+    private Runnable pendingLiveRecoveryRunnable = null;
+    private Runnable pendingSilentSpinnerRunnable = null;
+    private boolean silentRefreshUiSuppressed = false;
+
+    private boolean manualWifiSetupPending = false;
+    private String lastFailedWifiSsid = null;
+    private String lastWifiFailureReason = null;
+    private AlertDialog activeWifiDialog = null;
+
     private boolean isRecording = true;
     private boolean isMicOn = true;
     private boolean isConnected = false;
@@ -186,6 +227,11 @@ public class MainActivity extends Activity {
                 @Override
                 public void onConnected(String cameraIp, String ssid, CameraClient.SocType socType, int httpPort, String diagDetails) {
                     isConnected = true;
+                    manualWifiSetupPending = false;
+                    lastFailedWifiSsid = null;
+                    lastWifiFailureReason = null;
+                    dismissActiveWifiDialog();
+                    styleRescanButton();
                     galleryCacheDirty = true;
                     currentSsid = ssid;
                     currentDiagDetails = diagDetails;
@@ -198,7 +244,7 @@ public class MainActivity extends Activity {
 
                     if (tvWifiStatus != null) {
                         tvWifiStatus.setText(msg);
-                        tvWifiStatus.setTextColor(getResources().getColor(R.color.accent_green));
+                        tvWifiStatus.setTextColor(activePalette.statusPositive);
                     }
                     if (tvDiagInfo != null) {
                         tvDiagInfo.setText("Camera: " + socType.displayName + " (" + cameraIp + ") | " + diagDetails);
@@ -220,11 +266,13 @@ public class MainActivity extends Activity {
                 public void onDisconnected() {
                     isConnected = false;
                     isStartingLive = false;
+                    activeLiveStreamUrl = null;
+                    cancelLiveMaintenanceTimers();
                     liveRequestGeneration++;
                     addDiagLog("Wi-Fi disconnected");
                     if (tvWifiStatus != null) {
                         tvWifiStatus.setText("Disconnected");
-                        tvWifiStatus.setTextColor(getResources().getColor(R.color.accent_gold));
+                        tvWifiStatus.setTextColor(activePalette.statusWarning);
                     }
                     if (tvDiagInfo != null) {
                         tvDiagInfo.setText("Wi-Fi disconnected");
@@ -236,6 +284,28 @@ public class MainActivity extends Activity {
                     cachedScanResults.clear();
                     if (results != null) {
                         cachedScanResults.addAll(results);
+                    }
+                }
+
+                @Override
+                public void onManualSetupNeeded(String failedSsid, String reason, List<ScanResult> availableNetworks) {
+                    if (availableNetworks != null && !availableNetworks.isEmpty()) {
+                        cachedScanResults.clear();
+                        cachedScanResults.addAll(availableNetworks);
+                    }
+                    manualWifiSetupPending = true;
+                    lastFailedWifiSsid = failedSsid;
+                    lastWifiFailureReason = reason;
+                    styleRescanButton();
+                    addDiagLog("Manual Wi-Fi setup offered: " + (reason != null ? reason : "credentials needed"));
+
+                    if (isActivityVisible && !isFinishing() && !isExiting && !isConnected
+                            && (activeWifiDialog == null || !activeWifiDialog.isShowing())) {
+                        if (failedSsid != null && !failedSsid.isEmpty()) {
+                            showWifiPasswordDialog(failedSsid, getCapabilitiesForSsid(failedSsid), reason, true);
+                        } else {
+                            showAvailableNetworksDialog(reason);
+                        }
                     }
                 }
             });
@@ -285,9 +355,7 @@ public class MainActivity extends Activity {
                             if (m2007.find()) {
                                 int micStatus = Integer.parseInt(m2007.group(1));
                                 isMicOn = (micStatus == 1);
-                                if (btnToggleMic != null) {
-                                    btnToggleMic.setText(isMicOn ? "Mic On" : "Mic Muted");
-                                }
+                                styleMicButton();
                                 DebugLogger.log("MAIN", "Synced camera mic status from firmware: " + (isMicOn ? "ON" : "MUTED"));
                             }
 
@@ -297,7 +365,7 @@ public class MainActivity extends Activity {
                                 int recStatus = Integer.parseInt(m2001.group(1));
                                 isRecording = (recStatus == 1);
                                 if (tvRecBadge != null) tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
-                                if (btnToggleRecord != null) btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
+                                styleRecordButton();
                                 DebugLogger.log("MAIN", "Synced camera rec status from firmware: " + (isRecording ? "RECORDING" : "STOPPED"));
                             }
                         } catch (Exception e) {
@@ -314,10 +382,15 @@ public class MainActivity extends Activity {
     }
 
     private void initViews() {
+        activePalette = ThemeManager.loadSavedPalette(this);
+        loadSavedMirrorSettings();
+
+        layoutRoot = findViewById(R.id.layout_root);
+        layoutSidebar = findViewById(R.id.layout_sidebar);
+        dividerSidebar = findViewById(R.id.divider_sidebar);
         layoutLogoHeader = findViewById(R.id.layout_logo_header);
         tvTitle = (TextView) findViewById(R.id.tv_title);
-
-        TextView tvAppVersion = (TextView) findViewById(R.id.tv_app_version);
+        tvAppVersion = (TextView) findViewById(R.id.tv_app_version);
         if (tvAppVersion != null) {
             try {
                 String vName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
@@ -327,19 +400,26 @@ public class MainActivity extends Activity {
             }
         }
 
+        layoutWifiCard = findViewById(R.id.layout_wifi_card);
         tvWifiStatus = (TextView) findViewById(R.id.tv_wifi_status);
         btnRescan = (Button) findViewById(R.id.btn_rescan);
+        tvNavSectionLabel = (TextView) findViewById(R.id.tv_nav_section_label);
         btnTabLive = (Button) findViewById(R.id.btn_tab_live);
         btnTabGallery = (Button) findViewById(R.id.btn_tab_gallery);
+        btnTheme = (Button) findViewById(R.id.btn_theme);
         btnExportLog = (Button) findViewById(R.id.btn_export_log);
         btnExitApp = (Button) findViewById(R.id.btn_exit_app);
 
         // Diagnostic Bar
         layoutDiagBar = findViewById(R.id.layout_diag_bar);
         tvDiagInfo = (TextView) findViewById(R.id.tv_diag_info);
+        tvDiagTapHint = (TextView) findViewById(R.id.tv_diag_tap_hint);
 
         // Live Views
         layoutLiveMode = findViewById(R.id.layout_live_mode);
+        dividerLiveControls = findViewById(R.id.divider_live_controls);
+        layoutLiveControls = findViewById(R.id.layout_live_controls);
+        tvCamControlsLabel = (TextView) findViewById(R.id.tv_cam_controls_label);
         surfaceLive = (SurfaceView) findViewById(R.id.surface_live);
         if (surfaceLive != null) {
             surfaceLive.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -357,6 +437,8 @@ public class MainActivity extends Activity {
                 public void surfaceDestroyed(SurfaceHolder holder) {
                     liveSurface = null;
                     isStartingLive = false;
+                    activeLiveStreamUrl = null;
+                    cancelLiveMaintenanceTimers();
                     liveRequestGeneration++;
                     DebugLogger.log("MAIN", "Live Surface destroyed");
                 }
@@ -366,6 +448,7 @@ public class MainActivity extends Activity {
         tvStreamBadge = (TextView) findViewById(R.id.tv_stream_badge);
         tvRecBadge = (TextView) findViewById(R.id.tv_rec_badge);
         btnToggleCam = (Button) findViewById(R.id.btn_toggle_cam);
+        btnMirrorLive = (Button) findViewById(R.id.btn_mirror_live);
         btnSnapshot = (Button) findViewById(R.id.btn_snapshot);
         btnEmergencyLock = (Button) findViewById(R.id.btn_emergency_lock);
         btnToggleMic = (Button) findViewById(R.id.btn_toggle_mic);
@@ -376,8 +459,11 @@ public class MainActivity extends Activity {
 
         // Gallery Views
         layoutGalleryMode = findViewById(R.id.layout_gallery_mode);
+        dividerGalleryColumns = findViewById(R.id.divider_gallery_columns);
         frameGalleryContainer = findViewById(R.id.frame_gallery_container);
+        layoutGalleryTopOverlay = findViewById(R.id.layout_gallery_top_overlay);
         layoutGallerySeekOverlay = findViewById(R.id.layout_gallery_seek_overlay);
+        layoutSeekBarRow = findViewById(R.id.layout_seek_bar_row);
         tvSeekPosition = (TextView) findViewById(R.id.tv_seek_position);
         surfaceGallery = (SurfaceView) findViewById(R.id.surface_gallery);
         if (surfaceGallery != null) {
@@ -421,6 +507,8 @@ public class MainActivity extends Activity {
 
         clipAdapter = new ClipAdapter();
         lvClips.setAdapter(clipAdapter);
+
+        applyTheme();
     }
 
     private void setupListeners() {
@@ -449,13 +537,24 @@ public class MainActivity extends Activity {
             tvTitle.setOnClickListener(screenshotClickListener);
         }
 
-        // Manual Rescan / Re-verify
+        // Manual Rescan / Wi-Fi Setup Fallback (Long-press anytime to pick SSID / Password)
         if (btnRescan != null) {
             btnRescan.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    Toast.makeText(MainActivity.this, "Scanning for Wi-Fi / Probing Camera...", Toast.LENGTH_SHORT).show();
-                    wifiBridge.triggerManualRescan();
+                    if (manualWifiSetupPending && !isConnected) {
+                        openManualWifiSetup();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Scanning for Wi-Fi / Probing Camera...", Toast.LENGTH_SHORT).show();
+                        wifiBridge.triggerManualRescan();
+                    }
+                }
+            });
+            btnRescan.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    showAvailableNetworksDialog("Select your dashcam's Wi-Fi network to enter or update its password.");
+                    return true;
                 }
             });
         }
@@ -468,6 +567,9 @@ public class MainActivity extends Activity {
             }
         };
         tvWifiStatus.setOnClickListener(diagClickListener);
+        if (layoutWifiCard != null) {
+            layoutWifiCard.setOnClickListener(diagClickListener);
+        }
         if (layoutDiagBar != null) {
             layoutDiagBar.setOnClickListener(diagClickListener);
         }
@@ -486,6 +588,23 @@ public class MainActivity extends Activity {
                 switchTab(false);
             }
         });
+
+        // Theme Picker / Quick Cycler
+        if (btnTheme != null) {
+            btnTheme.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showThemeSelectionDialog();
+                }
+            });
+            btnTheme.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    cycleTheme();
+                    return true;
+                }
+            });
+        }
 
         // Export Log to USB
         if (btnExportLog != null) {
@@ -519,6 +638,16 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
+
+        // Horizontal Mirror Toggle (persisted independently per camera view mode)
+        if (btnMirrorLive != null) {
+            btnMirrorLive.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggleLiveMirror();
+                }
+            });
+        }
 
         // Take Snapshot
         btnSnapshot.setOnClickListener(new View.OnClickListener() {
@@ -576,13 +705,13 @@ public class MainActivity extends Activity {
                     @Override
                     public void onSuccess(Boolean result) {
                         isMicOn = targetMicState;
-                        btnToggleMic.setText(isMicOn ? "Mic On" : "Mic Muted");
+                        styleMicButton();
                         addDiagLog("Microphone " + (isMicOn ? "enabled" : "muted"));
                         Toast.makeText(MainActivity.this, isMicOn ? "Microphone enabled" : "Microphone muted", Toast.LENGTH_SHORT).show();
                     }
                     @Override
                     public void onError(Exception error) {
-                        btnToggleMic.setText(isMicOn ? "Mic On" : "Mic Muted"); // Revert
+                        styleMicButton(); // Revert
                         addDiagLog("Mic toggle failed: " + error.getMessage());
                         Toast.makeText(MainActivity.this, "Mic toggle failed: " + error.getMessage(), Toast.LENGTH_SHORT).show();
                     }
@@ -605,14 +734,14 @@ public class MainActivity extends Activity {
                         isRecording = targetRecState;
                         galleryCacheDirty = true;
                         tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
-                        btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
+                        styleRecordButton();
                         addDiagLog(isRecording ? "Loop recording resumed" : "Loop recording paused");
                     }
                     @Override
                     public void onError(Exception error) {
                         btnToggleRecord.setEnabled(true);
                         tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
-                        btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
+                        styleRecordButton();
                         addDiagLog("Recording toggle failed: " + error.getMessage());
                         Toast.makeText(MainActivity.this, "Recording toggle failed: " + error.getMessage(), Toast.LENGTH_SHORT).show();
                     }
@@ -738,8 +867,9 @@ public class MainActivity extends Activity {
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                 if (position >= 0 && position < displayedClips.size()) {
                     selectedClip = displayedClips.get(position);
+                    clipAdapter.notifyDataSetChanged();
                     tvSelectedClipName.setText(selectedClip.filename);
-                    tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Time: " + selectedClip.timeStr);
+                    tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " · " + selectedClip.timeStr);
                     checkUsbStatus();
                     playGalleryPreview(selectedClip);
                 }
@@ -772,19 +902,20 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Tap anywhere on the Gallery video container to toggle the overlaid scrub bar
+        // Tap anywhere on the Gallery viewport to toggle floating top & bottom M3 overlays
         if (frameGalleryContainer != null) {
             frameGalleryContainer.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    if (selectedClip == null || selectedClip.isPhoto || layoutGallerySeekOverlay == null) return;
-                    if (layoutGallerySeekOverlay.getVisibility() == View.VISIBLE) {
-                        if (!isUserSeeking) {
+                    boolean topVisible = (layoutGalleryTopOverlay != null && layoutGalleryTopOverlay.getVisibility() == View.VISIBLE);
+                    boolean botVisible = (layoutGallerySeekOverlay != null && layoutGallerySeekOverlay.getVisibility() == View.VISIBLE);
+                    if (topVisible || botVisible) {
+                        boolean activeTransfer = (usbDownloader != null && usbDownloader.isDownloading());
+                        if (!isUserSeeking && !activeTransfer && selectedClip != null) {
                             hideGallerySeekOverlay();
                         }
                     } else {
-                        boolean autoHide = (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying() && !galleryEnded);
-                        showGallerySeekOverlay(autoHide);
+                        showGallerySeekOverlay(shouldAutoHideGalleryOverlay());
                     }
                 }
             });
@@ -824,13 +955,13 @@ public class MainActivity extends Activity {
                             if (tvSeekPosition != null) {
                                 tvSeekPosition.setText(timeLabel);
                             }
-                            tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Seek: " + timeLabel);
+                            tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " \u00B7 Seek: " + timeLabel);
                         } else {
                             int pct = Math.min(100, Math.max(0, progress / 10));
                             if (tvSeekPosition != null) {
                                 tvSeekPosition.setText(pct + "%");
                             }
-                            tvClipDetails.setText(String.format(java.util.Locale.US, "Size: %s | Seek: %d%% | Time: %s",
+                            tvClipDetails.setText(String.format(java.util.Locale.US, "Size: %s \u00B7 Seek: %d%% \u00B7 %s",
                                     selectedClip.getFormattedSize(), pct, selectedClip.timeStr));
                         }
                     }
@@ -888,11 +1019,13 @@ public class MainActivity extends Activity {
                 @Override
                 public void onClick(View v) {
                     if (layoutGalleryListColumn != null) {
-                        boolean isVisible = (layoutGalleryListColumn.getVisibility() == View.VISIBLE);
-                        layoutGalleryListColumn.setVisibility(isVisible ? View.GONE : View.VISIBLE);
-                        btnToggleGalleryList.setText(isVisible ? "Show List" : "Hide List");
-                        btnToggleGalleryList.setBackgroundColor(getResources().getColor(
-                                isVisible ? R.color.accent_green : R.color.accent_blue));
+                        boolean wasVisible = (layoutGalleryListColumn.getVisibility() == View.VISIBLE);
+                        layoutGalleryListColumn.setVisibility(wasVisible ? View.GONE : View.VISIBLE);
+                        if (dividerGalleryColumns != null) {
+                            dividerGalleryColumns.setVisibility(wasVisible ? View.GONE : View.VISIBLE);
+                        }
+                        styleGalleryListToggleButton();
+                        showGallerySeekOverlay(shouldAutoHideGalleryOverlay());
 
                         // Recalculate aspect-preserving layout for expanded/collapsed preview area
                         if (surfaceGallery != null && vlcPlayerManager != null) {
@@ -909,19 +1042,331 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void styleFilterButton(Button btn, boolean active) {
-        if (btn == null) return;
-        btn.setBackgroundColor(getResources().getColor(active ? R.color.accent_blue : R.color.bg_button));
-        btn.setTextColor(active ? 0xFFFFFFFF : getResources().getColor(R.color.text_primary));
+    private void showThemeSelectionDialog() {
+        final ThemeManager.Palette[] palettes = ThemeManager.getPalettes();
+        final CharSequence[] labels = new CharSequence[palettes.length];
+        for (int i = 0; i < palettes.length; i++) {
+            ThemeManager.Palette p = palettes[i];
+            boolean isCurrent = p.id.equals(activePalette.id);
+            labels[i] = p.displayName + (isCurrent ? "   \u2713" : "");
+        }
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Select Interface Theme");
+        b.setItems(labels, new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                if (which >= 0 && which < palettes.length) {
+                    activePalette = palettes[which];
+                    ThemeManager.savePalette(MainActivity.this, activePalette);
+                    applyTheme();
+                    addDiagLog("Theme changed to " + activePalette.displayName);
+                }
+            }
+        });
+        b.setNegativeButton("Close", null);
+        b.show();
+    }
+
+    private void cycleTheme() {
+        String nextId = ThemeManager.nextPaletteId(activePalette.id);
+        activePalette = ThemeManager.getPaletteById(nextId);
+        ThemeManager.savePalette(this, activePalette);
+        applyTheme();
+        addDiagLog("Theme cycled to " + activePalette.displayName);
+        Toast.makeText(this, "Theme: " + activePalette.displayName, Toast.LENGTH_SHORT).show();
+    }
+
+    public static String getMirrorPrefKey(int viewMode) {
+        switch (viewMode) {
+            case CameraClient.VIEW_REAR:
+                return "mirror_rear";
+            case CameraClient.VIEW_DUAL:
+                return "mirror_dual";
+            default:
+                return "mirror_front";
+        }
+    }
+
+    public static String formatLiveStreamBadge(String modeLabel, boolean mirrored, String statusSuffix) {
+        String safeMode = (modeLabel != null && !modeLabel.isEmpty()) ? modeLabel : "CAM";
+        String prefix = mirrored ? (safeMode + " \u00B7 MIRROR") : safeMode;
+        if (statusSuffix == null || statusSuffix.isEmpty()) {
+            return prefix;
+        }
+        return prefix + " (" + statusSuffix + ")";
+    }
+
+    public static long computeLiveRecoveryDelayMs(int attempt) {
+        if (attempt <= 1) return 50L;
+        if (attempt == 2) return 400L;
+        if (attempt == 3) return 1000L;
+        return 2500L;
+    }
+
+    public static boolean isSilentLiveRefresh(int attempt) {
+        return attempt == 1;
+    }
+
+    private void loadSavedMirrorSettings() {
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS_UI_SETTINGS, Context.MODE_PRIVATE);
+            if (prefs != null) {
+                mirrorByViewMode[CameraClient.VIEW_FRONT] = prefs.getBoolean(getMirrorPrefKey(CameraClient.VIEW_FRONT), false);
+                mirrorByViewMode[CameraClient.VIEW_REAR] = prefs.getBoolean(getMirrorPrefKey(CameraClient.VIEW_REAR), false);
+                mirrorByViewMode[CameraClient.VIEW_DUAL] = prefs.getBoolean(getMirrorPrefKey(CameraClient.VIEW_DUAL), false);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private boolean isViewModeMirrored(int viewMode) {
+        if (viewMode < 0 || viewMode >= mirrorByViewMode.length) {
+            return false;
+        }
+        return mirrorByViewMode[viewMode];
+    }
+
+    private void setViewModeMirrored(int viewMode, boolean mirrored) {
+        if (viewMode < 0 || viewMode >= mirrorByViewMode.length) return;
+        if (mirrorByViewMode[viewMode] == mirrored) return;
+        mirrorByViewMode[viewMode] = mirrored;
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS_UI_SETTINGS, Context.MODE_PRIVATE);
+            if (prefs != null) {
+                prefs.edit().putBoolean(getMirrorPrefKey(viewMode), mirrored).apply();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void styleMirrorButton() {
+        if (btnMirrorLive == null) return;
+        ThemeManager.Palette p = activePalette;
+        int modeForUi = isStartingLive ? targetViewMode : activeStreamMode;
+        boolean mirrored = isViewModeMirrored(modeForUi);
+        btnMirrorLive.setText(mirrored ? "Mirror: ON" : "Mirror: OFF");
+        if (mirrored) {
+            ThemeManager.stylePillButton(this, btnMirrorLive, p.primaryContainer, p.onPrimaryContainer,
+                    Math.max(1, ThemeManager.dp(this, 1f)), p.primary, true);
+        } else {
+            ThemeManager.stylePillButton(this, btnMirrorLive, p.surfaceContainerHigh, p.onSurface, 0, 0, false);
+        }
+    }
+
+    private void styleRescanButton() {
+        if (btnRescan == null) return;
+        ThemeManager.Palette p = activePalette;
+        if (manualWifiSetupPending && !isConnected) {
+            btnRescan.setText("Wi-Fi Setup");
+            ThemeManager.stylePillButton(this, btnRescan, p.tertiaryContainer, p.onTertiaryContainer, 0, 0, true);
+        } else {
+            btnRescan.setText(R.string.btn_rescan);
+            ThemeManager.stylePillButton(this, btnRescan, p.surfaceContainerHigh, p.onSurface, 0, 0, false);
+        }
+    }
+
+    private void toggleLiveMirror() {
+        int mode = isStartingLive ? targetViewMode : activeStreamMode;
+        boolean nextMirrored = !isViewModeMirrored(mode);
+        setViewModeMirrored(mode, nextMirrored);
+        styleMirrorButton();
+
+        String modeLabel = getViewModeLabel(mode);
+        String msg = modeLabel + " live mirror: " + (nextMirrored ? "ON" : "OFF");
+        addDiagLog(msg);
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+
+        if (!isStartingLive && isLiveViewEligible(liveRequestGeneration)
+                && activeLiveStreamUrl != null && liveSurface != null && liveSurface.isValid()) {
+            if (tvStreamBadge != null) {
+                tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, "LIVE"));
+            }
+            List<String> singleFirst = new ArrayList<String>();
+            singleFirst.add(activeLiveStreamUrl);
+            for (String c : cameraClient.getCandidateStreamUrls(mode)) {
+                if (!singleFirst.contains(c)) singleFirst.add(c);
+            }
+            cancelLiveMaintenanceTimers();
+            final int reqGen = ++liveRequestGeneration;
+            tryPlayVlcCandidate(singleFirst, 0, mode, reqGen, true);
+        } else if (tvStreamBadge != null) {
+            tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, isConnected ? "LIVE" : "IDLE"));
+        }
+    }
+
+    private void styleMicButton() {
+        if (btnToggleMic == null) return;
+        ThemeManager.Palette p = activePalette;
+        btnToggleMic.setText(isMicOn ? "Mic On" : "Mic Muted");
+        if (isMicOn) {
+            ThemeManager.stylePillButton(this, btnToggleMic, p.secondaryContainer, p.onSecondaryContainer, 0, 0, false);
+        } else {
+            ThemeManager.stylePillButton(this, btnToggleMic, p.surfaceContainerHigh, p.statusWarning,
+                    Math.max(1, ThemeManager.dp(this, 1f)), p.outline, true);
+        }
+    }
+
+    private void styleRecordButton() {
+        if (btnToggleRecord == null) return;
+        ThemeManager.Palette p = activePalette;
+        btnToggleRecord.setText(isRecording ? "Stop Recording" : "Start Recording");
+        if (isRecording) {
+            ThemeManager.stylePillButton(this, btnToggleRecord, p.errorContainer, p.onErrorContainer, 0, 0, true);
+        } else {
+            ThemeManager.stylePillButton(this, btnToggleRecord, p.primary, p.onPrimary, 0, 0, true);
+        }
+    }
+
+    private void styleGalleryListToggleButton() {
+        if (btnToggleGalleryList == null) return;
+        ThemeManager.Palette p = activePalette;
+        boolean listVisible = (layoutGalleryListColumn == null || layoutGalleryListColumn.getVisibility() == View.VISIBLE);
+        btnToggleGalleryList.setText(listVisible ? "Hide List" : "Show List");
+        if (listVisible) {
+            ThemeManager.stylePillButton(this, btnToggleGalleryList, p.secondaryContainer, p.onSecondaryContainer, 0, 0, true);
+        } else {
+            ThemeManager.stylePillButton(this, btnToggleGalleryList, p.primaryContainer, p.onPrimaryContainer, 0, 0, true);
+        }
+    }
+
+    private void styleAllFilterChips() {
+        ThemeManager.Palette p = activePalette;
+        ThemeManager.styleFilterChip(this, btnFilterAll, p, "All", currentFilter == 0);
+        ThemeManager.styleFilterChip(this, btnFilterFront, p, "Front", currentFilter == 1);
+        ThemeManager.styleFilterChip(this, btnFilterRear, p, "Rear", currentFilter == 2);
+        ThemeManager.styleFilterChip(this, btnFilterLocked, p, "Emergency", currentFilter == 3);
+        ThemeManager.styleFilterChip(this, btnFilterPhotos, p, "Photos", currentFilter == 4);
+    }
+
+    private void applyTheme() {
+        ThemeManager.Palette p = activePalette;
+        int stroke1dp = Math.max(1, ThemeManager.dp(this, 1f));
+
+        if (getWindow() != null && getWindow().getDecorView() != null) {
+            getWindow().getDecorView().setBackgroundColor(p.surface);
+        }
+        if (layoutRoot != null) {
+            layoutRoot.setBackgroundColor(p.surface);
+        }
+
+        // Left Navigation Rail
+        if (layoutSidebar != null) {
+            layoutSidebar.setBackgroundColor(p.surfaceContainerLow);
+        }
+        if (dividerSidebar != null) {
+            dividerSidebar.setBackgroundColor(p.outlineVariant);
+        }
+        if (tvTitle != null) {
+            tvTitle.setTextColor(p.primary);
+        }
+        if (tvAppVersion != null) {
+            tvAppVersion.setTextColor(p.onSurfaceVariant);
+        }
+        ThemeManager.styleInteractiveCard(this, layoutWifiCard, p.surfaceContainer, p.onSurface, 12f, 0, 0);
+        if (tvWifiStatus != null) {
+            tvWifiStatus.setTextColor(isConnected ? p.statusPositive : p.statusWarning);
+        }
+        styleRescanButton();
+        if (tvNavSectionLabel != null) {
+            tvNavSectionLabel.setTextColor(p.onSurfaceVariant);
+        }
+
+        boolean liveActive = (layoutGalleryMode == null || layoutGalleryMode.getVisibility() != View.VISIBLE);
+        ThemeManager.styleNavRailButton(this, btnTabLive, p, getString(R.string.tab_live), liveActive);
+        ThemeManager.styleNavRailButton(this, btnTabGallery, p, "SD Card", !liveActive);
+
+        if (btnTheme != null) {
+            ThemeManager.stylePillButton(this, btnTheme, p.surfaceContainerHigh, p.onSurface, stroke1dp, p.outlineVariant, false);
+            btnTheme.setText(ThemeManager.buildThemeButtonLabel(p));
+        }
+        ThemeManager.stylePillButton(this, btnExportLog, p.surfaceContainerHigh, p.onSurfaceVariant, 0, 0, false);
+        ThemeManager.stylePillButton(this, btnExitApp, p.primary, p.onPrimary, 0, 0, true);
+
+        ThemeManager.styleInteractiveCard(this, layoutDiagBar, p.surfaceContainer, p.onSurface, 12f, 0, 0);
+        if (tvDiagInfo != null) {
+            tvDiagInfo.setTextColor(p.onSurfaceVariant);
+        }
+        if (tvDiagTapHint != null) {
+            tvDiagTapHint.setTextColor(p.primary);
+        }
+
+        // Live Mode Controls & Badges
+        ThemeManager.styleSurfaceCard(this, tvStreamBadge, p.scrimOverlay, 999f, stroke1dp, ThemeManager.OVERLAY_BORDER);
+        if (tvStreamBadge != null) {
+            tvStreamBadge.setTextColor(ThemeManager.OVERLAY_TEXT_PRIMARY);
+        }
+        ThemeManager.styleSurfaceCard(this, tvRecBadge, p.errorContainer, 999f, 0, 0);
+        if (tvRecBadge != null) {
+            tvRecBadge.setTextColor(p.onErrorContainer);
+        }
+        if (dividerLiveControls != null) {
+            dividerLiveControls.setBackgroundColor(p.outlineVariant);
+        }
+        if (layoutLiveControls != null) {
+            layoutLiveControls.setBackgroundColor(p.surfaceContainerLow);
+        }
+        if (tvCamControlsLabel != null) {
+            tvCamControlsLabel.setTextColor(p.onSurfaceVariant);
+        }
+        ThemeManager.stylePillButton(this, btnToggleCam, p.primary, p.onPrimary, 0, 0, true);
+        styleMirrorButton();
+        ThemeManager.stylePillButton(this, btnSnapshot, p.secondaryContainer, p.onSecondaryContainer, 0, 0, false);
+        ThemeManager.stylePillButton(this, btnEmergencyLock, p.tertiaryContainer, p.onTertiaryContainer, 0, 0, true);
+        styleMicButton();
+        styleRecordButton();
+        ThemeManager.stylePillButton(this, btnCameraRes, p.surfaceContainerHigh, p.primary, stroke1dp, p.outlineVariant, true);
+        ThemeManager.stylePillButton(this, btnSyncTime, p.surfaceContainerHigh, p.onSurfaceVariant, 0, 0, false);
+
+        // SD Card / Gallery Mode
+        if (layoutGalleryListColumn != null) {
+            layoutGalleryListColumn.setBackgroundColor(p.surfaceContainerLow);
+        }
+        if (dividerGalleryColumns != null) {
+            dividerGalleryColumns.setBackgroundColor(p.outlineVariant);
+        }
+        if (tvClipCount != null) {
+            tvClipCount.setTextColor(p.onSurfaceVariant);
+        }
+        if (tvEmptyGallery != null) {
+            tvEmptyGallery.setTextColor(p.onSurfaceVariant);
+        }
+        ThemeManager.stylePillButton(this, btnRefreshGallery, p.surfaceContainerHigh, p.onSurface, 0, 0, false);
+        styleAllFilterChips();
+
+        // Floating Smoked-Glass Video Overlays (high contrast over photographic video in all themes)
+        ThemeManager.styleSurfaceCard(this, layoutGalleryTopOverlay, p.scrimOverlay, 999f, stroke1dp, ThemeManager.OVERLAY_BORDER);
+        ThemeManager.styleSurfaceCard(this, layoutGallerySeekOverlay, p.scrimOverlay, 18f, stroke1dp, ThemeManager.OVERLAY_BORDER);
+        if (tvSelectedClipName != null) {
+            tvSelectedClipName.setTextColor(ThemeManager.OVERLAY_TEXT_PRIMARY);
+        }
+        if (tvSeekPosition != null) {
+            tvSeekPosition.setTextColor(ThemeManager.OVERLAY_TEXT_PRIMARY);
+        }
+        if (tvClipDetails != null) {
+            tvClipDetails.setTextColor(ThemeManager.OVERLAY_TEXT_SECONDARY);
+        }
+        if (tvDownloadStats != null) {
+            tvDownloadStats.setTextColor(ThemeManager.OVERLAY_POSITIVE);
+        }
+        styleGalleryListToggleButton();
+
+        int overlayChipBg = 0xFF28303B;
+        int overlayAccentText = p.isLight ? 0xFF9CF0F8 : p.primary;
+        ThemeManager.stylePillButton(this, btnPlaybackRate, overlayChipBg, overlayAccentText, 0, 0, true);
+        ThemeManager.stylePillButton(this, btnPlayClip, overlayChipBg, ThemeManager.OVERLAY_TEXT_PRIMARY, 0, 0, false);
+
+        int scrubberAccent = p.isLight ? 0xFF7FD8E2 : p.primary;
+        ThemeManager.styleSeekBar(this, sbGallerySeek, 0x44FFFFFF, scrubberAccent);
+        ThemeManager.styleHorizontalProgressBar(this, pbDownloadProgress, 0x38FFFFFF, scrubberAccent);
+
+        checkUsbStatus();
+        if (clipAdapter != null) {
+            clipAdapter.notifyDataSetChanged();
+        }
     }
 
     private void setGalleryFilter(int filter) {
         currentFilter = filter;
-        styleFilterButton(btnFilterAll, filter == 0);
-        styleFilterButton(btnFilterFront, filter == 1);
-        styleFilterButton(btnFilterRear, filter == 2);
-        styleFilterButton(btnFilterLocked, filter == 3);
-        styleFilterButton(btnFilterPhotos, filter == 4);
+        styleAllFilterChips();
         applyFilter();
     }
 
@@ -1006,6 +1451,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateViewModeUI() {
+        styleMirrorButton();
         if (btnToggleCam == null) return;
         if (!hasRearCamera) {
             btnToggleCam.setText("View: Front (Single Cam)");
@@ -1058,9 +1504,7 @@ public class MainActivity extends Activity {
             if (btnFilterRear != null) {
                 btnFilterRear.setVisibility(View.GONE);
             }
-            if (btnFilterAll != null) {
-                btnFilterAll.setText("All");
-            }
+            styleAllFilterChips();
             DebugLogger.log("MAIN", "Single camera configuration active (Front only, rear/dual views disabled)");
         } else {
             if (btnToggleCam != null) {
@@ -1070,6 +1514,7 @@ public class MainActivity extends Activity {
             if (btnFilterRear != null) {
                 btnFilterRear.setVisibility(View.VISIBLE);
             }
+            styleAllFilterChips();
         }
     }
 
@@ -1095,8 +1540,8 @@ public class MainActivity extends Activity {
             galleryLoadGeneration++;
             hideGallerySeekOverlay();
             clearPhotoPreview();
-            btnTabLive.setBackgroundColor(getResources().getColor(R.color.accent_blue));
-            btnTabGallery.setBackgroundColor(getResources().getColor(R.color.bg_button));
+            ThemeManager.styleNavRailButton(this, btnTabLive, activePalette, getString(R.string.tab_live), true);
+            ThemeManager.styleNavRailButton(this, btnTabGallery, activePalette, "SD Card", false);
             layoutLiveMode.setVisibility(View.VISIBLE);
             layoutGalleryMode.setVisibility(View.GONE);
 
@@ -1115,9 +1560,11 @@ public class MainActivity extends Activity {
             }
         } else {
             isStartingLive = false;
+            activeLiveStreamUrl = null;
+            cancelLiveMaintenanceTimers();
             liveRequestGeneration++;
-            btnTabLive.setBackgroundColor(getResources().getColor(R.color.bg_button));
-            btnTabGallery.setBackgroundColor(getResources().getColor(R.color.accent_blue));
+            ThemeManager.styleNavRailButton(this, btnTabLive, activePalette, getString(R.string.tab_live), false);
+            ThemeManager.styleNavRailButton(this, btnTabGallery, activePalette, "SD Card", true);
             layoutLiveMode.setVisibility(View.GONE);
             layoutGalleryMode.setVisibility(View.VISIBLE);
 
@@ -1128,10 +1575,15 @@ public class MainActivity extends Activity {
             if (selectedClip != null && selectedClip.isPhoto) {
                 if (surfaceGallery != null) surfaceGallery.setVisibility(View.GONE);
                 if (ivGalleryPhoto != null) ivGalleryPhoto.setVisibility(View.VISIBLE);
+                if (layoutSeekBarRow != null) layoutSeekBarRow.setVisibility(View.GONE);
             } else {
                 if (ivGalleryPhoto != null) ivGalleryPhoto.setVisibility(View.GONE);
                 if (surfaceGallery != null) surfaceGallery.setVisibility(View.VISIBLE);
+                if (layoutSeekBarRow != null) {
+                    layoutSeekBarRow.setVisibility(selectedClip != null ? View.VISIBLE : View.GONE);
+                }
             }
+            showGallerySeekOverlay(false);
 
             if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
             loadGalleryClips(false);
@@ -1149,6 +1601,118 @@ public class MainActivity extends Activity {
                 && layoutLiveMode.getVisibility() == View.VISIBLE;
     }
 
+    private final Runnable liveKeepaliveRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isLiveViewEligible(liveRequestGeneration) || activeLiveStreamUrl == null) {
+                return;
+            }
+            if (cameraClient != null) {
+                cameraClient.sendKeepaliveIfIdle();
+            }
+            lifecycleHandler.postDelayed(this, LIVE_KEEPALIVE_INTERVAL_MS);
+        }
+    };
+
+    private final Runnable liveHealthyResetRunnable = new Runnable() {
+        @Override
+        public void run() {
+            liveAutoReconnectCount = 0;
+        }
+    };
+
+    private void cancelSilentRefreshSpinner() {
+        silentRefreshUiSuppressed = false;
+        if (pendingSilentSpinnerRunnable != null) {
+            lifecycleHandler.removeCallbacks(pendingSilentSpinnerRunnable);
+            pendingSilentSpinnerRunnable = null;
+        }
+    }
+
+    private void cancelLiveMaintenanceTimers() {
+        lifecycleHandler.removeCallbacks(liveKeepaliveRunnable);
+        lifecycleHandler.removeCallbacks(liveHealthyResetRunnable);
+        cancelSilentRefreshSpinner();
+        if (pendingLiveRecoveryRunnable != null) {
+            lifecycleHandler.removeCallbacks(pendingLiveRecoveryRunnable);
+            pendingLiveRecoveryRunnable = null;
+        }
+    }
+
+    private void scheduleLiveMaintenanceTimers() {
+        lifecycleHandler.removeCallbacks(liveKeepaliveRunnable);
+        lifecycleHandler.postDelayed(liveKeepaliveRunnable, LIVE_KEEPALIVE_INTERVAL_MS);
+        lifecycleHandler.removeCallbacks(liveHealthyResetRunnable);
+        lifecycleHandler.postDelayed(liveHealthyResetRunnable, LIVE_HEALTHY_RESET_MS);
+    }
+
+    private void handleLiveStreamStall(final List<String> urls, final int index, final int streamMode,
+                                       final int reqGen, final String reason) {
+        if (!isLiveViewEligible(reqGen)) return;
+        activeLiveStreamUrl = null;
+        cancelLiveMaintenanceTimers();
+        liveAutoReconnectCount++;
+        final int attempt = liveAutoReconnectCount;
+        final boolean silentRefresh = isSilentLiveRefresh(attempt);
+        long delayMs = computeLiveRecoveryDelayMs(attempt);
+
+        String recoverMsg = "Live feed stalled (" + reason + ") — auto-refresh #" + attempt;
+        addDiagLog(recoverMsg);
+        DebugLogger.log("PLAYER_RECOVER", recoverMsg + " in " + delayMs + "ms"
+                + (silentRefresh ? " [silent]" : ""));
+        if (!silentRefresh && tvStreamBadge != null) {
+            tvStreamBadge.setText(formatLiveStreamBadge(
+                    getViewModeLabel(streamMode), isViewModeMirrored(streamMode), "REFRESHING..."));
+        }
+
+        pendingLiveRecoveryRunnable = new Runnable() {
+            @Override
+            public void run() {
+                pendingLiveRecoveryRunnable = null;
+                if (!isLiveViewEligible(reqGen)) return;
+
+                if (attempt == 1) {
+                    // Tier 1: Direct, silent zero-CGI RTSP reconnect (~170ms, zero spinner flash, zero SD interruption)
+                    tryPlayVlcCandidate(urls, index, streamMode, reqGen, true);
+                } else if (attempt == 2 && cameraClient != null) {
+                    // Tier 2: Non-disruptive CGI channel/liveview nudge + RTSP reconnect
+                    cameraClient.nudgeLiveEncoder(streamMode, new CameraClient.Callback<List<String>>() {
+                        @Override
+                        public void onSuccess(final List<String> refreshedUrls) {
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (isLiveViewEligible(reqGen)) {
+                                        tryPlayVlcCandidate(refreshedUrls, 0, streamMode, reqGen, false);
+                                    }
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onError(Exception error) {
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (isLiveViewEligible(reqGen)) {
+                                        tryPlayVlcCandidate(urls, 0, streamMode, reqGen, false);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                } else {
+                    // Tier 3+: Full session re-initialization
+                    if (cameraClient != null) {
+                        cameraClient.resetSessionState();
+                    }
+                    startLiveStream();
+                }
+            }
+        };
+        lifecycleHandler.postDelayed(pendingLiveRecoveryRunnable, delayMs);
+    }
+
     private void startLiveStream() {
         if (!isConnected || !isActivityVisible || isExiting || isFinishing()) return;
         if (layoutLiveMode != null && layoutLiveMode.getVisibility() != View.VISIBLE) {
@@ -1160,6 +1724,8 @@ public class MainActivity extends Activity {
             return;
         }
 
+        cancelLiveMaintenanceTimers();
+        activeLiveStreamUrl = null;
         final int modeToStart = targetViewMode;
         final int reqGen = ++liveRequestGeneration;
         currentViewMode = modeToStart;
@@ -1171,7 +1737,8 @@ public class MainActivity extends Activity {
         String prepMsg = "Initializing " + getViewModeLabel(modeToStart) + " feed...";
         addDiagLog(prepMsg);
         if (tvDiagInfo != null) tvDiagInfo.setText(prepMsg);
-        tvStreamBadge.setText(getViewModeLabel(modeToStart) + " (CONNECTING...)");
+        tvStreamBadge.setText(formatLiveStreamBadge(
+                getViewModeLabel(modeToStart), isViewModeMirrored(modeToStart), "CONNECTING..."));
 
         cameraClient.prepareAndStartLiveView(modeToStart, new CameraClient.Callback<List<String>>() {
             @Override
@@ -1188,7 +1755,7 @@ public class MainActivity extends Activity {
                         isStartingLive = false;
                         isRecording = true;
                         if (tvRecBadge != null) tvRecBadge.setVisibility(View.VISIBLE);
-                        if (btnToggleRecord != null) btnToggleRecord.setText("Stop Recording");
+                        styleRecordButton();
 
                         // If user queued a different view mode while camera was switching, switch immediately!
                         if (targetViewMode != modeToStart) {
@@ -1245,9 +1812,15 @@ public class MainActivity extends Activity {
     }
 
     private void tryPlayVlcCandidate(final List<String> urls, final int index, final int streamMode, final int reqGen) {
+        tryPlayVlcCandidate(urls, index, streamMode, reqGen, false);
+    }
+
+    private void tryPlayVlcCandidate(final List<String> urls, final int index, final int streamMode,
+                                     final int reqGen, final boolean silentRefresh) {
         if (!isLiveViewEligible(reqGen) || liveSurface == null || !liveSurface.isValid()) {
             return;
         }
+        cancelSilentRefreshSpinner();
         if (urls == null || index >= urls.size()) {
             pbLiveLoading.setVisibility(View.GONE);
             String label = getViewModeLabel(streamMode) + " (NO STREAM)";
@@ -1262,30 +1835,55 @@ public class MainActivity extends Activity {
         }
 
         final String currentUrl = urls.get(index);
+        final boolean mirrorMode = isViewModeMirrored(streamMode);
         String tryMsg = "Connecting [" + (index + 1) + "/" + urls.size() + "]: " + currentUrl;
         addDiagLog(tryMsg);
-        DebugLogger.log("PLAYER", tryMsg);
-        if (tvDiagInfo != null) {
-            tvDiagInfo.setText(tryMsg);
+        DebugLogger.log("PLAYER", tryMsg + (silentRefresh ? " [silent]" : ""));
+        if (!silentRefresh) {
+            if (tvDiagInfo != null) {
+                tvDiagInfo.setText(tryMsg);
+            }
+            tvStreamBadge.setText(formatLiveStreamBadge(getViewModeLabel(streamMode), mirrorMode, "CONNECTING..."));
+        } else {
+            silentRefreshUiSuppressed = true;
+            pendingSilentSpinnerRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    pendingSilentSpinnerRunnable = null;
+                    if (!isLiveViewEligible(reqGen) || !silentRefreshUiSuppressed) return;
+                    silentRefreshUiSuppressed = false;
+                    if (pbLiveLoading != null) {
+                        pbLiveLoading.setVisibility(View.VISIBLE);
+                    }
+                    if (tvStreamBadge != null) {
+                        tvStreamBadge.setText(formatLiveStreamBadge(
+                                getViewModeLabel(streamMode), isViewModeMirrored(streamMode), "REFRESHING..."));
+                    }
+                }
+            };
+            lifecycleHandler.postDelayed(pendingSilentSpinnerRunnable, LIVE_SILENT_REFRESH_SPINNER_DELAY_MS);
         }
-        tvStreamBadge.setText(getViewModeLabel(streamMode) + " [CONNECTING...]");
 
-        vlcPlayerManager.startLiveStream(surfaceLive, currentUrl, new VlcPlayerManager.LiveListener() {
+        vlcPlayerManager.startLiveStream(surfaceLive, currentUrl, mirrorMode, new VlcPlayerManager.LiveListener() {
             @Override
             public void onPlaying() {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        cancelSilentRefreshSpinner();
                         if (!isLiveViewEligible(reqGen)) {
                             if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
                             return;
                         }
                         activeStreamMode = streamMode;
                         currentViewMode = streamMode;
+                        activeLiveStreamUrl = currentUrl;
                         pbLiveLoading.setVisibility(View.GONE);
-                        String badge = getViewModeLabel(streamMode) + " (LIVE)";
+                        String badge = formatLiveStreamBadge(
+                                getViewModeLabel(streamMode), isViewModeMirrored(streamMode), "LIVE");
                         tvStreamBadge.setText(badge);
                         updateViewModeUI();
+                        scheduleLiveMaintenanceTimers();
                         String activeMsg = "Live feed active via LibVLC: " + currentUrl;
                         addDiagLog(activeMsg);
                         DebugLogger.log("PLAYER", activeMsg);
@@ -1308,10 +1906,23 @@ public class MainActivity extends Activity {
                     public void run() {
                         if (!isLiveViewEligible(reqGen)) return;
                         if (percent < 100.0f) {
-                            pbLiveLoading.setVisibility(View.VISIBLE);
+                            if (!silentRefreshUiSuppressed) {
+                                pbLiveLoading.setVisibility(View.VISIBLE);
+                            }
                         } else {
                             pbLiveLoading.setVisibility(View.GONE);
                         }
+                    }
+                });
+            }
+
+            @Override
+            public void onStreamStalled(final String reason) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        cancelSilentRefreshSpinner();
+                        handleLiveStreamStall(urls, index, streamMode, reqGen, reason);
                     }
                 });
             }
@@ -1321,10 +1932,17 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        cancelSilentRefreshSpinner();
                         if (!isLiveViewEligible(reqGen)) return;
                         addDiagLog("VLC Stream failed [" + currentUrl + "]: " + message);
                         DebugLogger.log("PLAYER_ERR", "Candidate " + (index + 1) + " failed: " + message);
-                        tryPlayVlcCandidate(urls, index + 1, streamMode, reqGen);
+                        if (index + 1 < urls.size()) {
+                            tryPlayVlcCandidate(urls, index + 1, streamMode, reqGen, false);
+                        } else if (liveAutoReconnectCount > 0) {
+                            handleLiveStreamStall(urls, 0, streamMode, reqGen, message);
+                        } else {
+                            tryPlayVlcCandidate(urls, index + 1, streamMode, reqGen, false);
+                        }
                     }
                 });
             }
@@ -1334,8 +1952,11 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (reqGen == liveRequestGeneration && pbLiveLoading != null) {
-                            pbLiveLoading.setVisibility(View.GONE);
+                        if (reqGen == liveRequestGeneration) {
+                            cancelSilentRefreshSpinner();
+                            if (pbLiveLoading != null) {
+                                pbLiveLoading.setVisibility(View.GONE);
+                            }
                         }
                     }
                 });
@@ -1405,11 +2026,22 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean shouldAutoHideGalleryOverlay() {
+        if (selectedClip == null || isUserSeeking || galleryEnded) return false;
+        if (usbDownloader != null && usbDownloader.isDownloading()) return false;
+        if (selectedClip.isPhoto) {
+            return currentPhotoBitmap != null;
+        }
+        return vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying();
+    }
+
     private final Runnable hideSeekOverlayRunnable = new Runnable() {
         @Override
         public void run() {
-            if (isUserSeeking || galleryEnded) return;
-            if (vlcPlayerManager != null && vlcPlayerManager.isGalleryPlaying()) {
+            if (shouldAutoHideGalleryOverlay()) {
+                if (layoutGalleryTopOverlay != null) {
+                    layoutGalleryTopOverlay.setVisibility(View.GONE);
+                }
                 if (layoutGallerySeekOverlay != null) {
                     layoutGallerySeekOverlay.setVisibility(View.GONE);
                 }
@@ -1419,16 +2051,22 @@ public class MainActivity extends Activity {
 
     private void showGallerySeekOverlay(boolean autoHide) {
         lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
+        if (layoutGalleryTopOverlay != null) {
+            layoutGalleryTopOverlay.setVisibility(View.VISIBLE);
+        }
         if (layoutGallerySeekOverlay != null) {
             layoutGallerySeekOverlay.setVisibility(View.VISIBLE);
         }
-        if (autoHide) {
+        if (autoHide && (usbDownloader == null || !usbDownloader.isDownloading())) {
             lifecycleHandler.postDelayed(hideSeekOverlayRunnable, SEEK_OVERLAY_AUTO_HIDE_MS);
         }
     }
 
     private void hideGallerySeekOverlay() {
         lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
+        if (layoutGalleryTopOverlay != null) {
+            layoutGalleryTopOverlay.setVisibility(View.GONE);
+        }
         if (layoutGallerySeekOverlay != null) {
             layoutGallerySeekOverlay.setVisibility(View.GONE);
         }
@@ -1510,7 +2148,10 @@ public class MainActivity extends Activity {
         galleryHasVout = false;
         lastGalleryBufferingMs = 0L;
         currentGalleryDurationMs = 0L;
-        hideGallerySeekOverlay();
+        if (layoutSeekBarRow != null) {
+            layoutSeekBarRow.setVisibility(View.GONE);
+        }
+        showGallerySeekOverlay(false);
         if (vlcPlayerManager != null) {
             vlcPlayerManager.stopGalleryClip();
         }
@@ -1593,9 +2234,12 @@ public class MainActivity extends Activity {
                             }
                             currentPhotoBitmap = finalBmp;
                             if (origW > 0 && origH > 0) {
-                                tvClipDetails.setText("Photo: " + origW + "x" + origH + " | Size: "
-                                        + photo.getFormattedSize() + " | Time: " + photo.timeStr);
+                                tvClipDetails.setText("Photo: " + origW + "x" + origH + " \u00B7 "
+                                        + photo.getFormattedSize() + " \u00B7 " + photo.timeStr);
+                            } else {
+                                tvClipDetails.setText("Photo \u00B7 " + photo.getFormattedSize() + " \u00B7 " + photo.timeStr);
                             }
+                            showGallerySeekOverlay(true);
                             addDiagLog("Displayed still photo: " + photo.filename + " (" + origW + "x" + origH + ")");
                         }
                     });
@@ -1610,8 +2254,9 @@ public class MainActivity extends Activity {
                                 pbGalleryLoading.setVisibility(View.GONE);
                             }
                             if (btnPlayClip != null) {
-                                btnPlayClip.setText("Retry Photo");
+                                btnPlayClip.setText("Retry");
                             }
+                            showGallerySeekOverlay(false);
                             String msg = "Photo preview error: " + e.getMessage();
                             addDiagLog(msg);
                             Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
@@ -1644,6 +2289,9 @@ public class MainActivity extends Activity {
         lastGalleryBufferingMs = 0L;
         currentGalleryDurationMs = 0L;
         lastKnownGalleryPosition = (startSeekPos >= 0.0f) ? startSeekPos : 0.0f;
+        if (layoutSeekBarRow != null) {
+            layoutSeekBarRow.setVisibility(View.VISIBLE);
+        }
         if (sbGallerySeek != null) {
             sbGallerySeek.setProgress(Math.round(lastKnownGalleryPosition * 1000.0f));
             sbGallerySeek.setEnabled(false);
@@ -1852,13 +2500,13 @@ public class MainActivity extends Activity {
                                 if (tvSeekPosition != null) {
                                     tvSeekPosition.setText(timeLabel);
                                 }
-                                tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | " + timeLabel);
+                                tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " \u00B7 " + timeLabel);
                             } else {
                                 int pct = Math.min(100, Math.max(0, Math.round(lastKnownGalleryPosition * 100.0f)));
                                 if (tvSeekPosition != null) {
                                     tvSeekPosition.setText(pct + "%");
                                 }
-                                tvClipDetails.setText(String.format(java.util.Locale.US, "Size: %s | Pos: %d%% | Time: %s",
+                                tvClipDetails.setText(String.format(java.util.Locale.US, "Size: %s \u00B7 Pos: %d%% \u00B7 %s",
                                         selectedClip.getFormattedSize(), pct, selectedClip.timeStr));
                             }
                         }
@@ -1903,8 +2551,8 @@ public class MainActivity extends Activity {
                         if (loadGen != galleryLoadGeneration || selectedClip != clip) return;
                         lastGalleryBufferingMs = 0L;
                         pbGalleryLoading.setVisibility(View.GONE);
-                        hideGallerySeekOverlay();
-                        btnPlayClip.setText("Play Preview");
+                        showGallerySeekOverlay(false);
+                        btnPlayClip.setText("Play");
                         String err = "VLC playback error: " + message;
                         addDiagLog(err);
                         DebugLogger.log("GALLERY_ERR", err);
@@ -1916,26 +2564,27 @@ public class MainActivity extends Activity {
     }
 
     private void checkUsbStatus() {
+        ThemeManager.Palette p = activePalette;
         File usbDir = UsbDownloader.getUsbDestinationFolder(false);
         boolean downloading = (usbDownloader != null && usbDownloader.isDownloading());
         if (downloading) {
             btnDownloadToUsb.setText("Cancel");
-            btnDownloadToUsb.setBackgroundColor(getResources().getColor(R.color.accent_red));
+            ThemeManager.stylePillButton(this, btnDownloadToUsb, p.errorContainer, p.onErrorContainer, 0, 0, true);
             btnDownloadToUsb.setEnabled(true);
         } else {
             btnDownloadToUsb.setText(R.string.btn_download_usb);
-            btnDownloadToUsb.setBackgroundColor(getResources().getColor(R.color.accent_green));
+            ThemeManager.stylePillButton(this, btnDownloadToUsb, p.primary, p.onPrimary, 0, 0, true);
         }
 
         if (usbDir != null) {
-            tvUsbStatus.setText("USB Drive: Ready (" + usbDir.getAbsolutePath() + ")");
-            tvUsbStatus.setTextColor(getResources().getColor(R.color.accent_green));
+            tvUsbStatus.setText("USB: Ready");
+            tvUsbStatus.setTextColor(ThemeManager.OVERLAY_POSITIVE);
             if (!downloading) {
                 btnDownloadToUsb.setEnabled(true);
             }
         } else {
-            tvUsbStatus.setText("USB Drive: Not detected (insert drive in car USB port)");
-            tvUsbStatus.setTextColor(getResources().getColor(R.color.accent_gold));
+            tvUsbStatus.setText("USB: Not detected");
+            tvUsbStatus.setTextColor(ThemeManager.OVERLAY_WARNING);
             if (!downloading) {
                 btnDownloadToUsb.setEnabled(false);
             }
@@ -1952,8 +2601,9 @@ public class MainActivity extends Activity {
         tvDownloadStats.setText("Starting...");
         tvDownloadStats.setVisibility(View.VISIBLE);
         btnDownloadToUsb.setText("Cancel");
-        btnDownloadToUsb.setBackgroundColor(getResources().getColor(R.color.accent_red));
+        ThemeManager.stylePillButton(this, btnDownloadToUsb, activePalette.errorContainer, activePalette.onErrorContainer, 0, 0, true);
         btnDownloadToUsb.setEnabled(true);
+        showGallerySeekOverlay(false);
 
         boolean isJieLi = (cameraClient.getSocType() == CameraClient.SocType.JIELI);
         usbDownloader.downloadClip(clip, cameraClient.getCameraIp(), isJieLi, cameraClient.getHttpPort(), new UsbDownloader.DownloadCallback() {
@@ -1963,7 +2613,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         pbDownloadProgress.setProgress(percent);
-                        tvDownloadStats.setText(String.format(java.util.Locale.US, "%d%% - %.2f MB/s", percent, speedMbPerSec));
+                        tvDownloadStats.setText(String.format(java.util.Locale.US, "%d%% \u00B7 %.2f MB/s", percent, speedMbPerSec));
                     }
                 });
             }
@@ -1976,6 +2626,7 @@ public class MainActivity extends Activity {
                         pbDownloadProgress.setVisibility(View.GONE);
                         tvDownloadStats.setVisibility(View.GONE);
                         checkUsbStatus();
+                        showGallerySeekOverlay(shouldAutoHideGalleryOverlay());
                         addDiagLog("Saved to USB: " + destinationFile.getName());
                         String kind = clip.isPhoto ? "Photo" : "Clip";
                         Toast.makeText(MainActivity.this, kind + " saved to USB:\n" + destinationFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
@@ -1991,6 +2642,7 @@ public class MainActivity extends Activity {
                         pbDownloadProgress.setVisibility(View.GONE);
                         tvDownloadStats.setVisibility(View.GONE);
                         checkUsbStatus();
+                        showGallerySeekOverlay(shouldAutoHideGalleryOverlay());
                         addDiagLog("USB transfer notice: " + error.getMessage());
                         Toast.makeText(MainActivity.this, "USB Transfer: " + error.getMessage(), Toast.LENGTH_LONG).show();
                     }
@@ -2030,10 +2682,10 @@ public class MainActivity extends Activity {
                 triggerUsbLogExport(true);
             }
         });
-        builder.setNegativeButton("View Wi-Fi Networks", new DialogInterface.OnClickListener() {
+        builder.setNegativeButton("Wi-Fi Setup / SSID", new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface dialog, int which) {
-                showAvailableNetworksDialog();
+                showAvailableNetworksDialog("Select your dashcam's Wi-Fi network to enter or update its password.");
             }
         });
         builder.show();
@@ -2044,7 +2696,7 @@ public class MainActivity extends Activity {
         final TextView tv = new TextView(this);
         tv.setText("Collecting system diagnostics...");
         tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
-        tv.setTextColor(getResources().getColor(R.color.text_primary));
+        tv.setTextColor(0xFFE1E6EE);
         tv.setTypeface(android.graphics.Typeface.MONOSPACE);
         tv.setPadding(16, 16, 16, 16);
         sv.addView(tv);
@@ -2123,36 +2775,262 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private void dismissActiveWifiDialog() {
+        if (activeWifiDialog != null) {
+            try {
+                if (activeWifiDialog.isShowing()) {
+                    activeWifiDialog.dismiss();
+                }
+            } catch (Exception ignored) {}
+            activeWifiDialog = null;
+        }
+    }
+
+    private String getCapabilitiesForSsid(String ssid) {
+        if (ssid == null || ssid.isEmpty()) return null;
+        if (wifiBridge != null) {
+            ScanResult sr = wifiBridge.findScanResultBySsid(ssid);
+            if (sr != null) return sr.capabilities;
+        }
+        String target = WifiBridge.cleanSsid(ssid);
+        for (ScanResult r : cachedScanResults) {
+            if (r != null && r.SSID != null && WifiBridge.cleanSsid(r.SSID).equalsIgnoreCase(target)) {
+                return r.capabilities;
+            }
+        }
+        return null;
+    }
+
+    private ScanResult findBestScanResult(String ssid) {
+        String target = WifiBridge.cleanSsid(ssid);
+        ScanResult best = null;
+        for (ScanResult r : cachedScanResults) {
+            if (r != null && r.SSID != null && WifiBridge.cleanSsid(r.SSID).equalsIgnoreCase(target)) {
+                if (best == null || r.level > best.level) {
+                    best = r;
+                }
+            }
+        }
+        return best;
+    }
+
+    private void openManualWifiSetup() {
+        if (lastFailedWifiSsid != null && !lastFailedWifiSsid.isEmpty()) {
+            showWifiPasswordDialog(lastFailedWifiSsid, getCapabilitiesForSsid(lastFailedWifiSsid),
+                    lastWifiFailureReason, true);
+        } else {
+            showAvailableNetworksDialog(lastWifiFailureReason);
+        }
+    }
+
     private void showAvailableNetworksDialog() {
-        if (cachedScanResults.isEmpty()) {
-            Toast.makeText(this, "Scanning for Wi-Fi networks...", Toast.LENGTH_SHORT).show();
-            wifiBridge.triggerManualRescan();
-            return;
+        showAvailableNetworksDialog(null);
+    }
+
+    private void showAvailableNetworksDialog(final String reasonNote) {
+        dismissActiveWifiDialog();
+
+        List<String> rawSsids = new ArrayList<String>(cachedScanResults.size());
+        for (ScanResult r : cachedScanResults) {
+            if (r != null && r.SSID != null && !r.SSID.trim().isEmpty()) {
+                rawSsids.add(r.SSID);
+            }
         }
 
-        final String[] ssids = new String[cachedScanResults.size()];
-        for (int i = 0; i < cachedScanResults.size(); i++) {
-            ScanResult r = cachedScanResults.get(i);
-            String name = (r.SSID != null && !r.SSID.isEmpty()) ? r.SSID : "<Hidden Network>";
-            ssids[i] = name + " (" + r.level + " dBm)";
+        String remembered = (wifiBridge != null) ? wifiBridge.getKnownSsid() : "";
+        final List<String> orderedSsids = WifiBridge.prioritizeSsidsForPicker(
+                rawSsids, lastFailedWifiSsid, remembered);
+
+        final CharSequence[] items = new CharSequence[orderedSsids.size() + 1];
+        for (int i = 0; i < orderedSsids.size(); i++) {
+            String ssid = orderedSsids.get(i);
+            ScanResult sr = findBestScanResult(ssid);
+            int secMode = WifiBridge.classifySecurityMode(sr != null ? sr.capabilities : null);
+            String secLabel = (secMode == WifiBridge.SEC_OPEN) ? "Open" : "WPA/WPA2";
+            String rssiPart = (sr != null) ? (sr.level + " dBm, ") : "";
+            boolean isPinned = WifiBridge.isMatchingSsid(ssid)
+                    || (!remembered.isEmpty() && ssid.equalsIgnoreCase(remembered))
+                    || (lastFailedWifiSsid != null && ssid.equalsIgnoreCase(lastFailedWifiSsid));
+            items[i] = (isPinned ? "\u2605 " : "") + ssid + "  (" + rssiPart + secLabel + ")";
         }
+        items[orderedSsids.size()] = "[Enter Hidden / Custom SSID...]";
 
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("Visible Networks (" + cachedScanResults.size() + ")");
-        builder.setItems(ssids, new DialogInterface.OnClickListener() {
+        if (orderedSsids.isEmpty()) {
+            builder.setTitle("Select Dashcam Wi-Fi (Scanning...)");
+        } else {
+            builder.setTitle("Select Dashcam Wi-Fi (" + orderedSsids.size() + " visible)");
+        }
+        builder.setItems(items, new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface dialog, int which) {
-                if (which >= 0 && which < cachedScanResults.size()) {
-                    ScanResult chosen = cachedScanResults.get(which);
-                    if (chosen.SSID != null && !chosen.SSID.isEmpty()) {
-                        Toast.makeText(MainActivity.this, "Connecting to " + chosen.SSID + "...", Toast.LENGTH_SHORT).show();
-                        wifiBridge.connectToSpecificSsid(chosen.SSID, WifiBridge.DEFAULT_PASSWORD);
+                if (which >= 0 && which < orderedSsids.size()) {
+                    String chosenSsid = orderedSsids.get(which);
+                    ScanResult sr = findBestScanResult(chosenSsid);
+                    String caps = (sr != null) ? sr.capabilities : null;
+                    if (WifiBridge.classifySecurityMode(caps) == WifiBridge.SEC_OPEN) {
+                        manualWifiSetupPending = false;
+                        styleRescanButton();
+                        Toast.makeText(MainActivity.this, "Connecting to " + chosenSsid + "...", Toast.LENGTH_SHORT).show();
+                        wifiBridge.connectToSpecificSsid(chosenSsid, "");
+                    } else {
+                        boolean failedThisSsid = (lastFailedWifiSsid != null && chosenSsid.equalsIgnoreCase(lastFailedWifiSsid));
+                        showWifiPasswordDialog(chosenSsid, caps, failedThisSsid ? reasonNote : null, failedThisSsid);
                     }
+                } else {
+                    showCustomSsidEntryDialog();
                 }
             }
         });
+        builder.setNeutralButton("Rescan Networks", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                manualWifiSetupPending = false;
+                styleRescanButton();
+                Toast.makeText(MainActivity.this, "Rescanning Wi-Fi networks...", Toast.LENGTH_SHORT).show();
+                wifiBridge.triggerManualRescan();
+            }
+        });
         builder.setNegativeButton("Close", null);
-        builder.show();
+        activeWifiDialog = builder.create();
+        activeWifiDialog.show();
+    }
+
+    private void showCustomSsidEntryDialog() {
+        dismissActiveWifiDialog();
+        int pad = ThemeManager.dp(this, 16f);
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(pad, pad / 2, pad, pad / 2);
+
+        TextView tvPrompt = new TextView(this);
+        tvPrompt.setText("Enter your dashcam's exact Wi-Fi network name (SSID):");
+        tvPrompt.setTextSize(14f);
+        container.addView(tvPrompt);
+
+        final EditText etSsid = new EditText(this);
+        etSsid.setSingleLine(true);
+        etSsid.setHint("e.g. CAR_CAM_xxxx or custom SSID");
+        etSsid.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        etSsid.setImeOptions(EditorInfo.IME_ACTION_NEXT | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        container.addView(etSsid);
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Enter Custom Camera SSID");
+        b.setView(container);
+        b.setPositiveButton("Next", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                String typed = WifiBridge.cleanSsid(etSsid.getText().toString().trim());
+                if (typed.isEmpty()) {
+                    Toast.makeText(MainActivity.this, "SSID cannot be empty", Toast.LENGTH_SHORT).show();
+                    showCustomSsidEntryDialog();
+                    return;
+                }
+                showWifiPasswordDialog(typed, "WPA2-PSK-CCMP", null, false);
+            }
+        });
+        b.setNeutralButton("Back to List", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                showAvailableNetworksDialog(null);
+            }
+        });
+        b.setNegativeButton("Cancel", null);
+        activeWifiDialog = b.create();
+        activeWifiDialog.show();
+    }
+
+    private void showWifiPasswordDialog(final String ssid, final String capabilities,
+                                        final String reasonNote, final boolean defaultJustFailed) {
+        dismissActiveWifiDialog();
+        final String cleanSsid = WifiBridge.cleanSsid(ssid);
+        final int secMode = WifiBridge.classifySecurityMode(capabilities);
+
+        int pad = ThemeManager.dp(this, 16f);
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(pad, pad / 2, pad, pad / 4);
+
+        TextView tvInfo = new TextView(this);
+        StringBuilder msg = new StringBuilder();
+        if (reasonNote != null && !reasonNote.isEmpty()) {
+            msg.append(reasonNote).append("\n\n");
+        }
+        if (defaultJustFailed) {
+            msg.append("Enter the Wi-Fi password for \"").append(cleanSsid).append("\":");
+        } else {
+            msg.append("Enter the Wi-Fi password for \"").append(cleanSsid)
+               .append("\"\n(or leave blank to use default ").append(WifiBridge.DEFAULT_PASSWORD).append("):");
+        }
+        tvInfo.setText(msg.toString());
+        tvInfo.setTextSize(13f);
+        container.addView(tvInfo);
+
+        final EditText etPassword = new EditText(this);
+        etPassword.setSingleLine(true);
+        etPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        etPassword.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        if (wifiBridge != null && wifiBridge.hasCustomPasswordForSsid(cleanSsid) && !defaultJustFailed) {
+            String saved = wifiBridge.getSavedPasswordForSsid(cleanSsid);
+            etPassword.setText(saved);
+            etPassword.setSelection(saved.length());
+        } else if (defaultJustFailed) {
+            etPassword.setHint("Enter camera Wi-Fi password (8+ chars)");
+        } else {
+            etPassword.setHint("Default: " + WifiBridge.DEFAULT_PASSWORD);
+        }
+        container.addView(etPassword);
+
+        CheckBox cbShow = new CheckBox(this);
+        cbShow.setText("Show password");
+        cbShow.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                int sel = etPassword.getSelectionEnd();
+                if (isChecked) {
+                    etPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+                } else {
+                    etPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                }
+                if (sel >= 0 && sel <= etPassword.getText().length()) {
+                    etPassword.setSelection(sel);
+                }
+            }
+        });
+        container.addView(cbShow);
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(defaultJustFailed ? "Camera Wi-Fi Password Required" : ("Connect to " + cleanSsid));
+        builder.setView(container);
+        builder.setPositiveButton("Connect", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                String entered = etPassword.getText().toString();
+                if (entered.isEmpty() && !defaultJustFailed) {
+                    entered = WifiBridge.DEFAULT_PASSWORD;
+                }
+                if (!WifiBridge.isValidWifiPassword(entered, secMode)) {
+                    Toast.makeText(MainActivity.this,
+                            "Wi-Fi WPA password must be 8 to 63 characters.", Toast.LENGTH_LONG).show();
+                    showWifiPasswordDialog(cleanSsid, capabilities, reasonNote, defaultJustFailed);
+                    return;
+                }
+                manualWifiSetupPending = false;
+                styleRescanButton();
+                Toast.makeText(MainActivity.this, "Connecting to " + cleanSsid + "...", Toast.LENGTH_SHORT).show();
+                wifiBridge.connectToSpecificSsid(cleanSsid, entered);
+            }
+        });
+        builder.setNeutralButton("Select SSID...", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                showAvailableNetworksDialog(null);
+            }
+        });
+        builder.setNegativeButton("Cancel", null);
+        activeWifiDialog = builder.create();
+        activeWifiDialog.show();
     }
 
     private void showExitDialog() {
@@ -2219,6 +3097,8 @@ public class MainActivity extends Activity {
 
         DebugLogger.log("LIFECYCLE", "Activity moved to background; stopping active video decoders");
         isStartingLive = false;
+        activeLiveStreamUrl = null;
+        cancelLiveMaintenanceTimers();
         liveRequestGeneration++;
         lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
         if (vlcPlayerManager != null) {
@@ -2226,7 +3106,7 @@ public class MainActivity extends Activity {
             vlcPlayerManager.stopGalleryClip();
         }
         if (btnPlayClip != null && selectedClip != null && !selectedClip.isPhoto) {
-            btnPlayClip.setText("Play Preview");
+            btnPlayClip.setText("Play");
         }
 
         // If camera was left in Playback/Gallery mode or recording was paused, resume loop recording BEFORE Wi-Fi suspends
@@ -2267,11 +3147,14 @@ public class MainActivity extends Activity {
                     nextIdx = (curIdx <= 0) ? (displayedClips.size() - 1) : (curIdx - 1);
                 }
                 selectedClip = displayedClips.get(nextIdx);
+                if (clipAdapter != null) {
+                    clipAdapter.notifyDataSetChanged();
+                }
                 if (lvClips != null) {
                     lvClips.setSelection(nextIdx);
                 }
                 tvSelectedClipName.setText(selectedClip.filename);
-                tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " | Time: " + selectedClip.timeStr);
+                tvClipDetails.setText("Size: " + selectedClip.getFormattedSize() + " \u00B7 " + selectedClip.timeStr);
                 checkUsbStatus();
                 playGalleryPreview(selectedClip);
                 return true;
@@ -2396,6 +3279,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        dismissActiveWifiDialog();
         lifecycleHandler.removeCallbacksAndMessages(null);
         clearPhotoPreview();
         if (vlcPlayerManager != null) vlcPlayerManager.release();
@@ -2456,8 +3340,9 @@ public class MainActivity extends Activity {
                             ClipItem item = holder.boundClip;
                             if (item == null) return;
                             selectedClip = item;
+                            notifyDataSetChanged();
                             tvSelectedClipName.setText(item.filename);
-                            tvClipDetails.setText("Size: " + item.getFormattedSize() + " | Time: " + item.timeStr);
+                            tvClipDetails.setText("Size: " + item.getFormattedSize() + " \u00B7 " + item.timeStr);
                             startUsbDownload(item);
                         }
                     });
@@ -2470,33 +3355,55 @@ public class MainActivity extends Activity {
             final ClipItem clip = displayedClips.get(position);
             holder.boundClip = clip;
 
+            ThemeManager.Palette p = activePalette;
+            boolean isSelected = (selectedClip != null && clip == selectedClip);
+            ThemeManager.styleClipRowCard(MainActivity.this, convertView, p, isSelected);
+
             holder.tvFilename.setText(clip.filename);
+            holder.tvFilename.setTextColor(isSelected ? p.onSecondaryContainer : p.onSurface);
+
+            int metaColor = isSelected ? p.onSecondaryContainer : p.onSurfaceVariant;
             holder.tvTime.setText(clip.timeStr != null && !clip.timeStr.isEmpty() ? clip.timeStr : "-");
+            holder.tvTime.setTextColor(metaColor);
             holder.tvSize.setText(clip.getFormattedSize());
+            holder.tvSize.setTextColor(metaColor);
 
             // Clean colored text badges without colored background boxes
             if (clip.isFront) {
                 holder.tvCamBadge.setText("FRONT");
-                holder.tvCamBadge.setTextColor(getResources().getColor(R.color.accent_blue));
+                holder.tvCamBadge.setTextColor(p.primary);
             } else {
                 holder.tvCamBadge.setText("REAR");
-                holder.tvCamBadge.setTextColor(getResources().getColor(R.color.accent_gold));
+                holder.tvCamBadge.setTextColor(p.statusWarning);
             }
 
             if (clip.isPhoto && clip.isLocked) {
                 holder.tvLockBadge.setVisibility(View.VISIBLE);
                 holder.tvLockBadge.setText("PHOTO \u00B7 LOCKED");
-                holder.tvLockBadge.setTextColor(getResources().getColor(R.color.accent_red));
+                holder.tvLockBadge.setTextColor(p.error);
             } else if (clip.isLocked) {
                 holder.tvLockBadge.setVisibility(View.VISIBLE);
                 holder.tvLockBadge.setText("LOCKED");
-                holder.tvLockBadge.setTextColor(getResources().getColor(R.color.accent_red));
+                holder.tvLockBadge.setTextColor(p.error);
             } else if (clip.isPhoto) {
                 holder.tvLockBadge.setVisibility(View.VISIBLE);
                 holder.tvLockBadge.setText("PHOTO");
-                holder.tvLockBadge.setTextColor(getResources().getColor(R.color.accent_green));
+                holder.tvLockBadge.setTextColor(p.statusPositive);
             } else {
                 holder.tvLockBadge.setVisibility(View.GONE);
+            }
+
+            if (holder.btnItemDownload != null) {
+                ThemeManager.stylePillButton(
+                        MainActivity.this,
+                        holder.btnItemDownload,
+                        isSelected ? p.primary : p.surfaceContainerHigh,
+                        isSelected ? p.onPrimary : p.primary,
+                        0,
+                        0,
+                        true);
+                holder.btnItemDownload.setFocusable(false);
+                holder.btnItemDownload.setFocusableInTouchMode(false);
             }
 
             return convertView;

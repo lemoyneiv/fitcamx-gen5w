@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.SurfaceView;
@@ -14,6 +15,7 @@ import android.widget.FrameLayout;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.interfaces.IMedia;
 import org.videolan.libvlc.interfaces.IVLCVout;
 
 import java.util.ArrayList;
@@ -54,9 +56,14 @@ public class VlcPlayerManager {
         }
     }
 
+    public static final long LIVE_OPEN_TIMEOUT_MS = 8500L;
+    public static final long LIVE_STALL_TIMEOUT_MS = 1200L;
+    public static final long LIVE_WATCHDOG_POLL_MS = 250L;
+
     public interface LiveListener {
         void onPlaying();
         void onBuffering(float percent);
+        void onStreamStalled(String reason);
         void onError(String message);
         void onStopped();
     }
@@ -140,6 +147,88 @@ public class VlcPlayerManager {
         return 1.0f;
     }
 
+    /**
+     * Pure helper: determines whether an active live stream has stalled due to missing RTP/video progress.
+     */
+    public static boolean isLiveStreamStalled(boolean hasPlayed, long lastProgressUptimeMs,
+                                              long nowUptimeMs, long stallThresholdMs) {
+        if (!hasPlayed || lastProgressUptimeMs <= 0L) {
+            return false;
+        }
+        return (nowUptimeMs - lastProgressUptimeMs) >= stallThresholdMs;
+    }
+
+    /**
+     * Pure helper: determines whether a live stream connection attempt hung in Opening state.
+     */
+    public static boolean isLiveOpenTimedOut(boolean hasPlayed, long openStartUptimeMs,
+                                             long nowUptimeMs, long openTimeoutMs) {
+        if (hasPlayed || openStartUptimeMs <= 0L) {
+            return false;
+        }
+        return (nowUptimeMs - openStartUptimeMs) >= openTimeoutMs;
+    }
+
+    /**
+     * Pure helper: determines whether LibVLC's input/demux/decoder/vout counters have genuinely
+     * advanced since the previous watchdog sample. Strictly ignores zero-valued counters and
+     * synthetic wall-clock TimeChanged ticks so RTP starvation is detected within LIVE_STALL_TIMEOUT_MS
+     * instead of waiting 10 seconds for live555's internal inactivity timeout.
+     */
+    public static boolean didLiveStatsAdvance(int prevReadBytes, int prevDemuxBytes,
+                                              int prevDecodedVideo, int prevDisplayedPics,
+                                              int curReadBytes, int curDemuxBytes,
+                                              int curDecodedVideo, int curDisplayedPics) {
+        return (curReadBytes > 0 && curReadBytes != prevReadBytes)
+                || (curDemuxBytes > 0 && curDemuxBytes != prevDemuxBytes)
+                || (curDecodedVideo > 0 && curDecodedVideo != prevDecodedVideo)
+                || (curDisplayedPics > 0 && curDisplayedPics != prevDisplayedPics);
+    }
+
+    /**
+     * Pure helper: builds global LibVLC instance CLI arguments.
+     * Note: In VLC 3.0, vout_thread_t inherits "video-filter" and "transform-type" from
+     * libvlc_media_player_t -> LibVLC (NOT from input_thread_t / Media.addOption). Therefore,
+     * horizontal mirroring uses a dedicated LibVLC + MediaPlayer pair configured with
+     * --video-filter=transform and --transform-type=hflip, leaving standard live & SD gallery
+     * playback unflipped.
+     */
+    public static ArrayList<String> buildEngineOptions(boolean mirrorHorizontal) {
+        ArrayList<String> options = new ArrayList<String>(10);
+        // RTSP over TCP is mandatory for Gen5W cellular firewall / rmnet0 bypass
+        options.add("--rtsp-tcp");
+        // Dedicated 4 worker threads for the 4 physical Cortex-A7 CPU cores
+        options.add("--avcodec-threads=4");
+        // Software decoding pipeline: bypass buggy OMX.TCC.avcdec on KitKat
+        options.add("--avcodec-hw=none");
+        // Fast decoding optimizations (fast IDCT, simplified motion compensation)
+        options.add("--avcodec-fast");
+        // Disable OSD & subtitle font scanning (avoids missing /system/etc/fonts.xml errors on Gen5W)
+        options.add("--no-osd");
+        options.add("--no-spu");
+        if (mirrorHorizontal) {
+            options.add("--video-filter=transform");
+            options.add("--transform-type=hflip");
+        }
+        return options;
+    }
+
+    /**
+     * Pure helper: builds LibVLC per-media options for Live RTSP/HTTP streaming.
+     */
+    public static List<String> buildLiveMediaOptions(boolean mirrorHorizontal) {
+        List<String> opts = new ArrayList<String>(8);
+        opts.add(":rtsp-tcp");
+        opts.add(":network-caching=300");
+        opts.add(":ipv4-timeout=5000");
+        opts.add(":no-audio"); // mute live preview to avoid vehicle audio interruption
+        opts.add(":avcodec-threads=4");
+        opts.add(":avcodec-fast");
+        opts.add(":clock-jitter=0");
+        opts.add(":clock-synchro=0");
+        return opts;
+    }
+
     private final Context context;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final List<Runnable> pendingReadyActions = new ArrayList<Runnable>();
@@ -149,7 +238,10 @@ public class VlcPlayerManager {
     private volatile boolean released = false;
 
     private LibVLC libVLC;
+    private LibVLC mirrorLibVLC;
     private MediaPlayer livePlayer;
+    private MediaPlayer mirrorLivePlayer;
+    private MediaPlayer activeLivePlayer;
     private MediaPlayer galleryPlayer;
 
     private volatile LiveListener liveListener;
@@ -157,6 +249,13 @@ public class VlcPlayerManager {
     private volatile int liveSessionGen = 0;
     private volatile int gallerySessionGen = 0;
     private volatile boolean liveStopNeeded = false;
+    private volatile boolean liveHasPlayed = false;
+    private volatile long liveOpenStartUptimeMs = 0L;
+    private volatile long lastLiveProgressUptimeMs = 0L;
+    private int lastLiveReadBytes = 0;
+    private int lastLiveDemuxBytes = 0;
+    private int lastLiveDecodedVideo = 0;
+    private int lastLiveDisplayedPictures = 0;
     private volatile boolean galleryStopNeeded = false;
     private volatile boolean galleryOpening = false;
 
@@ -181,35 +280,43 @@ public class VlcPlayerManager {
             @Override
             public void run() {
                 try {
-                    ArrayList<String> options = new ArrayList<String>();
-                    // RTSP over TCP is mandatory for Gen5W cellular firewall / rmnet0 bypass
-                    options.add("--rtsp-tcp");
-                    // Dedicated 4 worker threads for the 4 physical Cortex-A7 CPU cores
-                    options.add("--avcodec-threads=4");
-                    // Software decoding pipeline: bypass buggy OMX.TCC.avcdec on KitKat
-                    options.add("--avcodec-hw=none");
-                    // Fast decoding optimizations (fast IDCT, simplified motion compensation)
-                    options.add("--avcodec-fast");
-                    // Quiet non-critical logs
-                    options.add("--no-stats");
-
-                    final LibVLC createdLib = new LibVLC(context, options);
+                    final LibVLC createdLib = new LibVLC(context, buildEngineOptions(false));
                     final MediaPlayer createdLive = new MediaPlayer(createdLib);
                     final MediaPlayer createdGallery = new MediaPlayer(createdLib);
+
+                    LibVLC tempMirrorLib = null;
+                    MediaPlayer tempMirrorLive = null;
+                    try {
+                        tempMirrorLib = new LibVLC(context, buildEngineOptions(true));
+                        tempMirrorLive = new MediaPlayer(tempMirrorLib);
+                    } catch (Throwable mirrorErr) {
+                        Log.w(TAG, "Mirror LibVLC init warning: " + mirrorErr.getMessage());
+                        DebugLogger.log("VLC", "Mirror LibVLC init warning: " + mirrorErr.getMessage());
+                        if (tempMirrorLib != null) {
+                            try { tempMirrorLib.release(); } catch (Throwable ignored) {}
+                            tempMirrorLib = null;
+                        }
+                    }
+                    final LibVLC createdMirrorLib = tempMirrorLib;
+                    final MediaPlayer createdMirrorLive = tempMirrorLive;
 
                     mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
                             if (released) {
-                                releaseNativeObjectsAsync(createdLive, createdGallery, createdLib);
+                                releaseNativeObjectsAsync(createdLive, createdMirrorLive, createdGallery, createdLib, createdMirrorLib);
                                 return;
                             }
                             libVLC = createdLib;
+                            mirrorLibVLC = createdMirrorLib;
                             livePlayer = createdLive;
+                            mirrorLivePlayer = createdMirrorLive;
+                            activeLivePlayer = createdLive;
                             galleryPlayer = createdGallery;
                             initialized = true;
 
-                            DebugLogger.log("VLC", "Consolidated LibVLC engine initialized asynchronously (ARM NEON 4-thread software decoder ready)");
+                            DebugLogger.log("VLC", "Consolidated LibVLC engine initialized asynchronously (ARM NEON 4-thread software decoder + native hflip mirror engine="
+                                    + (createdMirrorLive != null) + ")");
                             flushPendingActions();
                         }
                     });
@@ -370,7 +477,7 @@ public class VlcPlayerManager {
     public void recomputeLayout(final SurfaceView surfaceView, final boolean isLive) {
         if (surfaceView == null) return;
         double aspect = isLive ? liveAspect : galleryAspect;
-        MediaPlayer player = isLive ? livePlayer : galleryPlayer;
+        MediaPlayer player = isLive ? (activeLivePlayer != null ? activeLivePlayer : livePlayer) : galleryPlayer;
         IVLCVout vout = (player != null) ? player.getVLCVout() : null;
         applyVideoLayout(vout, surfaceView, aspect);
     }
@@ -379,36 +486,170 @@ public class VlcPlayerManager {
     // LIVE STREAM PLAYBACK
     // =========================================================================
 
-    private void bindLiveEventListener(final int sessionGen, final LiveListener listener) {
-        livePlayer.setEventListener(new MediaPlayer.EventListener() {
+    private final Runnable liveWatchdogRunnable = new Runnable() {
+        @Override
+        public void run() {
+            final MediaPlayer currentPlayer = activeLivePlayer;
+            if (released || !liveStopNeeded || currentPlayer == null) {
+                return;
+            }
+            final int observedGen = liveSessionGen;
+            final LiveListener activeListener = liveListener;
+            long now = SystemClock.uptimeMillis();
+
+            if (!liveHasPlayed) {
+                if (isLiveOpenTimedOut(false, liveOpenStartUptimeMs, now, LIVE_OPEN_TIMEOUT_MS)) {
+                    DebugLogger.log("VLC_LIVE", "Live stream open timed out after " + (now - liveOpenStartUptimeMs) + "ms");
+                    stopLiveStream();
+                    if (activeListener != null) {
+                        activeListener.onError("Live stream open timeout");
+                    }
+                    return;
+                }
+                mainHandler.postDelayed(this, LIVE_WATCHDOG_POLL_MS);
+                return;
+            }
+
+            try {
+                IMedia media = currentPlayer.getMedia();
+                if (media != null) {
+                    try {
+                        IMedia.Stats stats = media.getStats();
+                        if (stats != null && didLiveStatsAdvance(
+                                lastLiveReadBytes, lastLiveDemuxBytes,
+                                lastLiveDecodedVideo, lastLiveDisplayedPictures,
+                                stats.readBytes, stats.demuxReadBytes,
+                                stats.decodedVideo, stats.displayedPictures)) {
+                            lastLiveReadBytes = stats.readBytes;
+                            lastLiveDemuxBytes = stats.demuxReadBytes;
+                            lastLiveDecodedVideo = stats.decodedVideo;
+                            lastLiveDisplayedPictures = stats.displayedPictures;
+                            lastLiveProgressUptimeMs = now;
+                        }
+                    } finally {
+                        media.release();
+                    }
+                }
+            } catch (Throwable ignored) {}
+
+            if (observedGen != liveSessionGen || !liveStopNeeded) {
+                return;
+            }
+
+            if (isLiveStreamStalled(liveHasPlayed, lastLiveProgressUptimeMs, now, LIVE_STALL_TIMEOUT_MS)) {
+                long silentMs = now - lastLiveProgressUptimeMs;
+                DebugLogger.log("VLC_LIVE", "Live stream stall detected (no RTP/frame progress for " + silentMs + "ms)");
+                stopLiveStream();
+                if (activeListener != null) {
+                    activeListener.onStreamStalled(String.format(java.util.Locale.US,
+                            "No RTP/video frames for %.1fs", silentMs / 1000.0));
+                }
+                return;
+            }
+
+            mainHandler.postDelayed(this, LIVE_WATCHDOG_POLL_MS);
+        }
+    };
+
+    private void armLiveWatchdog() {
+        mainHandler.removeCallbacks(liveWatchdogRunnable);
+        mainHandler.postDelayed(liveWatchdogRunnable, LIVE_WATCHDOG_POLL_MS);
+    }
+
+    private void disarmLiveWatchdog() {
+        mainHandler.removeCallbacks(liveWatchdogRunnable);
+    }
+
+    private void bindLiveEventListener(final MediaPlayer targetPlayer, final int sessionGen, final LiveListener listener) {
+        targetPlayer.setEventListener(new MediaPlayer.EventListener() {
             @Override
             public void onEvent(MediaPlayer.Event event) {
-                if (sessionGen != liveSessionGen || released || livePlayer == null) {
+                if (sessionGen != liveSessionGen || released || activeLivePlayer != targetPlayer) {
                     return;
                 }
                 switch (event.type) {
                     case MediaPlayer.Event.Playing:
+                        liveHasPlayed = true;
+                        lastLiveProgressUptimeMs = SystemClock.uptimeMillis();
                         DebugLogger.log("VLC_LIVE", "Live stream playing (First frame rendered)");
                         if (listener != null) listener.onPlaying();
                         break;
+                    case MediaPlayer.Event.Vout:
+                        if (event.getVoutCount() > 0) {
+                            liveHasPlayed = true;
+                            lastLiveProgressUptimeMs = SystemClock.uptimeMillis();
+                        }
+                        break;
+                    case MediaPlayer.Event.TimeChanged:
+                    case MediaPlayer.Event.PositionChanged:
+                        // Intentionally do NOT reset lastLiveProgressUptimeMs here: VLC's internal
+                        // monotonic input_clock_t keeps emitting TimeChanged for 10s while live555
+                        // receives 0 RTP bytes. Real progress is tracked strictly via IMedia.Stats.
+                        break;
                     case MediaPlayer.Event.Buffering:
-                        if (listener != null) listener.onBuffering(event.getBuffering());
+                        float pct = event.getBuffering();
+                        if (listener != null) {
+                            if (shouldShowSpinnerOnBuffering(pct, liveHasPlayed)) {
+                                listener.onBuffering(pct);
+                            } else {
+                                listener.onBuffering(100.0f);
+                            }
+                        }
                         break;
-                    case MediaPlayer.Event.EncounteredError:
+                    case MediaPlayer.Event.EndReached: {
+                        disarmLiveWatchdog();
+                        boolean wasUnexpected = liveStopNeeded;
+                        boolean hadVideo = liveHasPlayed;
                         liveStopNeeded = false;
-                        DebugLogger.log("VLC_LIVE", "Live stream encountered error");
-                        if (listener != null) listener.onError("Live stream connection error");
+                        DebugLogger.log("VLC_LIVE", "Live stream reached EOF (wasPlaying=" + hadVideo + ")");
+                        if (wasUnexpected && listener != null) {
+                            if (hadVideo) {
+                                listener.onStreamStalled("RTSP stream ended (EOF)");
+                            } else {
+                                listener.onError("Live stream ended before rendering");
+                            }
+                        }
                         break;
-                    case MediaPlayer.Event.Stopped:
+                    }
+                    case MediaPlayer.Event.EncounteredError: {
+                        disarmLiveWatchdog();
+                        boolean hadVideo = liveHasPlayed;
                         liveStopNeeded = false;
-                        if (listener != null) listener.onStopped();
+                        DebugLogger.log("VLC_LIVE", "Live stream encountered error (wasPlaying=" + hadVideo + ")");
+                        if (listener != null) {
+                            if (hadVideo) {
+                                listener.onStreamStalled("RTSP stream connection error");
+                            } else {
+                                listener.onError("Live stream connection error");
+                            }
+                        }
                         break;
+                    }
+                    case MediaPlayer.Event.Stopped: {
+                        disarmLiveWatchdog();
+                        boolean unexpectedStop = liveStopNeeded && liveHasPlayed;
+                        liveStopNeeded = false;
+                        if (unexpectedStop) {
+                            DebugLogger.log("VLC_LIVE", "Live stream stopped unexpectedly mid-session");
+                            if (listener != null) {
+                                listener.onStreamStalled("RTSP stream stopped unexpectedly");
+                            }
+                        } else if (listener != null) {
+                            listener.onStopped();
+                        }
+                        break;
+                    }
                 }
             }
         });
     }
 
     public void startLiveStream(final SurfaceView surfaceView, final String streamUrl, final LiveListener listener) {
+        startLiveStream(surfaceView, streamUrl, false, listener);
+    }
+
+    public void startLiveStream(final SurfaceView surfaceView, final String streamUrl,
+                                final boolean mirrorHorizontal, final LiveListener listener) {
         runWhenReady(new Runnable() {
             @Override
             public void run() {
@@ -419,32 +660,45 @@ public class VlcPlayerManager {
 
                 try {
                     stopLiveStream();
+                    final boolean useMirrorEngine = mirrorHorizontal && mirrorLibVLC != null && mirrorLivePlayer != null;
+                    final LibVLC targetLib = useMirrorEngine ? mirrorLibVLC : libVLC;
+                    final MediaPlayer targetPlayer = useMirrorEngine ? mirrorLivePlayer : livePlayer;
+
                     final int myGen = ++liveSessionGen;
+                    activeLivePlayer = targetPlayer;
                     liveListener = listener;
                     attachedLiveSurfaceView = surfaceView;
+                    liveHasPlayed = false;
+                    long now = SystemClock.uptimeMillis();
+                    liveOpenStartUptimeMs = now;
+                    lastLiveProgressUptimeMs = now;
+                    lastLiveReadBytes = 0;
+                    lastLiveDemuxBytes = 0;
+                    lastLiveDecodedVideo = 0;
+                    lastLiveDisplayedPictures = 0;
+
                     // Re-binding calls VLCObject.setEventListener, which flushes stale MainLooper
                     // EventRunnables (such as Event.Stopped from the previous stream) before play().
-                    bindLiveEventListener(myGen, listener);
-                    attachWithLayoutScaler(livePlayer, surfaceView, true);
+                    bindLiveEventListener(targetPlayer, myGen, listener);
+                    attachWithLayoutScaler(targetPlayer, surfaceView, true);
 
                     Uri uri = Uri.parse(streamUrl);
-                    Media media = new Media(libVLC, uri);
+                    Media media = new Media(targetLib, uri);
                     media.setHWDecoderEnabled(false, false);
-                    media.addOption(":rtsp-tcp");
-                    media.addOption(":network-caching=300");
-                    media.addOption(":no-audio"); // mute live preview to avoid vehicle audio interruption
-                    media.addOption(":avcodec-threads=4");
-                    media.addOption(":avcodec-fast");
-                    media.addOption(":clock-jitter=0");
-                    media.addOption(":clock-synchro=0");
+                    for (String opt : buildLiveMediaOptions(mirrorHorizontal)) {
+                        media.addOption(opt);
+                    }
 
-                    livePlayer.setMedia(media);
+                    targetPlayer.setMedia(media);
                     media.release();
 
                     liveStopNeeded = true;
-                    DebugLogger.log("VLC_LIVE", "Starting live RTSP/TCP: " + streamUrl);
-                    livePlayer.play();
+                    DebugLogger.log("VLC_LIVE", "Starting live RTSP/TCP"
+                            + (useMirrorEngine ? " [MIRRORED hflip]" : "") + ": " + streamUrl);
+                    targetPlayer.play();
+                    armLiveWatchdog();
                 } catch (Throwable t) {
+                    disarmLiveWatchdog();
                     liveStopNeeded = false;
                     Log.e(TAG, "startLiveStream error", t);
                     DebugLogger.log("VLC_LIVE", "startLiveStream error: " + t.getMessage());
@@ -454,25 +708,39 @@ public class VlcPlayerManager {
         });
     }
 
+    private static void stopAndDetachLivePlayer(MediaPlayer player, boolean forceStop) {
+        if (player == null) return;
+        try {
+            if (forceStop || player.isPlaying()) {
+                player.stop();
+            }
+            IVLCVout vout = player.getVLCVout();
+            if (vout != null && vout.areViewsAttached()) {
+                vout.detachViews();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "stopLiveStream error: " + t.getMessage());
+        }
+    }
+
     public void stopLiveStream() {
+        disarmLiveWatchdog();
         liveSessionGen++;
         liveListener = null;
-        if (livePlayer != null) {
-            try {
-                // Stop unconditionally when liveStopNeeded is true (covers Opening & Buffering states too)
-                if (liveStopNeeded || livePlayer.isPlaying()) {
-                    liveStopNeeded = false;
-                    livePlayer.stop();
-                }
-                IVLCVout vout = livePlayer.getVLCVout();
-                if (vout != null && vout.areViewsAttached()) {
-                    vout.detachViews();
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "stopLiveStream error: " + t.getMessage());
-            }
-        }
+        liveHasPlayed = false;
+        boolean needForceStop = liveStopNeeded;
         liveStopNeeded = false;
+
+        MediaPlayer current = activeLivePlayer;
+        if (current != null) {
+            stopAndDetachLivePlayer(current, needForceStop);
+        }
+        if (livePlayer != null && livePlayer != current) {
+            stopAndDetachLivePlayer(livePlayer, false);
+        }
+        if (mirrorLivePlayer != null && mirrorLivePlayer != current) {
+            stopAndDetachLivePlayer(mirrorLivePlayer, false);
+        }
     }
 
     // =========================================================================
@@ -784,7 +1052,9 @@ public class VlcPlayerManager {
     // LIFECYCLE CLEANUP (NON-BLOCKING UI THREAD DETACH + ASYNC NATIVE JOIN)
     // =========================================================================
 
-    private static void releaseNativeObjectsAsync(final MediaPlayer live, final MediaPlayer gallery, final LibVLC vlc) {
+    private static void releaseNativeObjectsAsync(final MediaPlayer live, final MediaPlayer mirrorLive,
+                                                  final MediaPlayer gallery, final LibVLC vlc,
+                                                  final LibVLC mirrorVlc) {
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -793,6 +1063,10 @@ public class VlcPlayerManager {
                         try { live.stop(); } catch (Throwable ignored) {}
                         try { live.release(); } catch (Throwable ignored) {}
                     }
+                    if (mirrorLive != null) {
+                        try { mirrorLive.stop(); } catch (Throwable ignored) {}
+                        try { mirrorLive.release(); } catch (Throwable ignored) {}
+                    }
                     if (gallery != null) {
                         try { gallery.stop(); } catch (Throwable ignored) {}
                         try { gallery.release(); } catch (Throwable ignored) {}
@@ -800,7 +1074,10 @@ public class VlcPlayerManager {
                     if (vlc != null) {
                         try { vlc.release(); } catch (Throwable ignored) {}
                     }
-                    DebugLogger.log("VLC", "LibVLC native engine released cleanly on background thread");
+                    if (mirrorVlc != null) {
+                        try { mirrorVlc.release(); } catch (Throwable ignored) {}
+                    }
+                    DebugLogger.log("VLC", "LibVLC native engines released cleanly on background thread");
                 } catch (Throwable t) {
                     Log.w(TAG, "Async release warning: " + t.getMessage());
                 }
@@ -811,10 +1088,12 @@ public class VlcPlayerManager {
     public void release() {
         if (released) return;
         released = true;
+        disarmLiveWatchdog();
         initialized = false;
         liveSessionGen++;
         gallerySessionGen++;
         liveStopNeeded = false;
+        liveHasPlayed = false;
         galleryStopNeeded = false;
         galleryOpening = false;
         liveListener = null;
@@ -822,16 +1101,28 @@ public class VlcPlayerManager {
         pendingReadyActions.clear();
 
         final MediaPlayer liveToRelease = livePlayer;
+        final MediaPlayer mirrorLiveToRelease = mirrorLivePlayer;
         final MediaPlayer galleryToRelease = galleryPlayer;
         final LibVLC vlcToRelease = libVLC;
+        final LibVLC mirrorVlcToRelease = mirrorLibVLC;
+        activeLivePlayer = null;
         livePlayer = null;
+        mirrorLivePlayer = null;
         galleryPlayer = null;
         libVLC = null;
+        mirrorLibVLC = null;
 
         try {
             if (liveToRelease != null) {
                 liveToRelease.setEventListener(null);
                 IVLCVout vout = liveToRelease.getVLCVout();
+                if (vout != null && vout.areViewsAttached()) {
+                    vout.detachViews();
+                }
+            }
+            if (mirrorLiveToRelease != null) {
+                mirrorLiveToRelease.setEventListener(null);
+                IVLCVout vout = mirrorLiveToRelease.getVLCVout();
                 if (vout != null && vout.areViewsAttached()) {
                     vout.detachViews();
                 }
@@ -847,8 +1138,10 @@ public class VlcPlayerManager {
             Log.w(TAG, "Surface detach warning during release: " + t.getMessage());
         }
 
-        if (liveToRelease != null || galleryToRelease != null || vlcToRelease != null) {
-            releaseNativeObjectsAsync(liveToRelease, galleryToRelease, vlcToRelease);
+        if (liveToRelease != null || mirrorLiveToRelease != null || galleryToRelease != null
+                || vlcToRelease != null || mirrorVlcToRelease != null) {
+            releaseNativeObjectsAsync(liveToRelease, mirrorLiveToRelease, galleryToRelease,
+                    vlcToRelease, mirrorVlcToRelease);
         }
     }
 }

@@ -1,14 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg_dark">#121418</color>
-    <color name="bg_panel">#1b1e24</color>
-    <color name="bg_button">#282c35</color>
-    <color name="bg_button_pressed">#3b414d</color>
-    <color name="accent_blue">#0091ff</color>
-    <color name="accent_red">#e53935</color>
-    <color name="accent_green">#2ecc71</color>
-    <color name="accent_gold">#f39c12</color>
-    <color name="text_primary">#ffffff</color>
-    <color name="text_secondary">#9e9e9e</color>
-    <color name="divider">#2a2f3b</color>
+    <!-- Default Ocean Blue M3 Baseline Tokens (overridden dynamically by ThemeManager) -->
+    <color name="bg_dark">#0F1419</color>
+    <color name="bg_panel">#171C22</color>
+    <color name="bg_button">#28303A</color>
+    <color name="bg_button_pressed">#333C48</color>
+    <color name="accent_blue">#9ECAFF</color>
+    <color name="accent_red">#93000A</color>
+    <color name="accent_green">#6DD58C</color>
+    <color name="accent_gold">#FFB951</color>
+    <color name="text_primary">#E1E6EE</color>
+    <color name="text_secondary">#B8C2CE</color>
+    <color name="divider">#323B46</color>
 </resources>

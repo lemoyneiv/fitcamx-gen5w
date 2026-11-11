@@ -5,25 +5,10 @@
         <item name="android:textColor">@color/text_primary</item>
     </style>
 
-    <style name="HoloButton">
-        <item name="android:background">@color/bg_button</item>
-        <item name="android:textColor">@color/text_primary</item>
-        <item name="android:textSize">16sp</item>
-        <item name="android:paddingLeft">14dp</item>
-        <item name="android:paddingRight">14dp</item>
-        <item name="android:paddingTop">8dp</item>
-        <item name="android:paddingBottom">8dp</item>
-    </style>
-
-    <style name="HoloButton.Active">
-        <item name="android:background">@color/accent_blue</item>
-        <item name="android:textColor">#ffffff</item>
-        <item name="android:textStyle">bold</item>
-    </style>
-
-    <style name="HoloButton.Danger">
-        <item name="android:background">@color/accent_red</item>
-        <item name="android:textColor">#ffffff</item>
-        <item name="android:textStyle">bold</item>
+    <style name="M3PillButton">
+        <item name="android:minHeight">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:gravity">center</item>
     </style>
 </resources>

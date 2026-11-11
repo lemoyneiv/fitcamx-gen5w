@@ -4,7 +4,7 @@
 ![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)
 ![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v0.6.1-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v0.7.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
 A native, high-performance dashcam viewer and controller application specifically engineered for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" widescreen displays running Android 4.4.2 KitKat API 19).
 
@@ -14,10 +14,10 @@ Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT9
 
 ## Screenshots
 
-The application is specifically engineered for Gen5W 24:9 ultra-widescreen infotainment displays (1920×720 and 2560×720), featuring ergonomic driver-side controls, centered 16:9 aspect-ratio video surfaces, and non-intrusive translucent overlays.
+The application is specifically engineered for Gen5W 24:9 ultra-widescreen infotainment displays (1920×720 and 2560×720), featuring a themable **Material Design 3** interface (shown below in **Ioniq Teal**), ergonomic driver-side stadium pill controls, full-height centered 16:9 video surfaces, and auto-hiding smoked-glass overlays.
 
-### Live View (Front, Dual PiP & Rear Streams)
-*RTSP live monitoring with non-disruptive channel switching, real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
+### Live View (Front, Dual PiP, Rear & Rear Mirror Streams)
+*RTSP live monitoring with non-disruptive channel switching, per-view horizontal mirroring (`Mirror: ON`), real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
 
 ![Live View - Front Camera](docs/screenshots/01_live_front.png)
 
@@ -29,18 +29,18 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 
 ![Rear Camera View](docs/screenshots/03_live_rear.png)
 
+*Rear camera with rearview-mirror horizontal flip (`Mirror: ON`)*
+
+![Rear Camera Mirrored View](docs/screenshots/04_live_rear_mirror.png)
+
 ### SD Card Footage & Still Photo Gallery
-*Indexed SD card media browser with `All`, `Front`, `Rear`, `Emergency`, and `Photos` filters, 4K HEVC playback with rate controls, and direct USB export.*
+*Indexed SD card media browser with `All`, `Front`, `Rear`, `Emergency`, and `Photos` filter chips, compact M3 clip cards, 4K HEVC playback, and direct USB export.*
 
-![SD Card Footage Playback](docs/screenshots/04_4k_playback.png)
+![SD Card Footage Playback](docs/screenshots/05_4k_playback.png)
 
-*File picker hidden for expanded playback with translucent scrub bar overlay*
+*File picker hidden for full-height 1120×630 playback with auto-hiding smoked-glass toolbar & scrub bar overlays*
 
-![Hidden File Picker and Scrub Bar Overlay](docs/screenshots/05_hidden_picker.png)
-
-*Still Photos filter and in-app snapshot viewer*
-
-![Still Photos Viewer](docs/screenshots/06_still_photos.png)
+![Hidden File Picker and Scrub Bar Overlay](docs/screenshots/06_hidden_picker.png)
 
 ---
 
@@ -50,16 +50,16 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 - Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
 
 ### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release package: [**`fitcamx-gen5w-v0.6.1-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.1/fitcamx-gen5w-v0.6.1-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.6.1-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.6.1)).
+1. Download the latest release package: [**`fitcamx-gen5w-v0.7.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip) (also available in [`dist/`](dist/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip) or on the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.7.0)).
 2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
-   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.6.1.zip`.
+   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.7.0.zip`.
 3. Insert the flash drive into the vehicle's multimedia USB port.
 4. Open the **HMG-API** app on the infotainment screen.
 5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
 6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
 
 ### Method 2: NEMESIS Package Store
-1. Download [**`fitcamx-gen5w-v0.6.1-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.6.1/fitcamx-gen5w-v0.6.1-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.6.1-nemesis-package.zip`](dist/fitcamx-gen5w-v0.6.1-nemesis-package.zip)) and copy to your USB drive.
+1. Download [**`fitcamx-gen5w-v0.7.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-nemesis-usb.zip) (or package [`dist/fitcamx-gen5w-v0.7.0-nemesis-package.zip`](dist/fitcamx-gen5w-v0.7.0-nemesis-package.zip)) and copy to your USB drive.
 2. Launch NEMESIS Manager on the head unit and install the package.
 
 ---
@@ -69,7 +69,7 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 - **Embedded LibVLC 3.3.4 Media Engine:**
   - Self-contained software & hardware decoding pipeline (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`).
   - **Zero external codec dependencies** — operates standalone without requiring codec packs or system modifications.
-  - Smooth RTSP streaming with sub-second latency for Front, Rear, and Dual camera feeds (`rtsp://192.168.1.254/xxx.mov`).
+  - Smooth RTSP streaming with sub-second latency for Front, Rear, and Dual camera feeds (`rtsp://192.168.1.254/xxx.mov`), kept continuously active via Novatek `cmd=3016` heartbeats, `1.2s` RTP/frame stall detection (`IMedia.Stats`), and silent zero-CGI self-healing RTSP reconnects (`~160 ms`).
   - Uninterrupted recording: Live stream monitoring does not pause or interrupt ongoing dashcam recording.
 
 - **Dual-Profile SD Card Playback Engine:**
@@ -77,13 +77,19 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
   - **Rear 1080p H.264 Clips:** Plays at full 30 fps 1.0x speed with complete hardware/SIMD acceleration.
   - Audio is automatically muted during gallery playback to prevent interfering with vehicle radio/audio focus.
 
-- **Optimized 24:9 / 8:3 Widescreen Interface:**
-  - Ergonomic vertical control sidebar along the left display edge for direct driver reach.
-  - Maximized video viewing area for both live streams and SD card clip playback.
+- **Material Design 3 (`m3.material.io`) Themable Interface:**
+  - Includes **6 curated automotive color themes** tailored for Gen5W cabins: **Ocean Blue** (default), **Ioniq Teal**, **M3 Violet**, **Kia Crimson**, **Genesis Copper**, and **Daylight (Light)**.
+  - Built natively for Android 4.4.2 KitKat (API 19) with zero external UI library overhead: tonal surface hierarchy, stadium pill controls, `8dp` filter chips, `12dp` clip cards, state-layer press feedback, and verified WCAG AA (`>= 4.5:1`) contrast across every role.
+  - **Live Hot-Swapping:** Tap the sidebar theme pill to pick a palette, or long-press to cycle themes immediately without restarting the app or interrupting active video playback.
+
+- **Optimized 24:9 / 8:3 Widescreen Interface & Full-Height Playback:**
+  - Ergonomic vertical navigation rail along the left display edge for direct driver reach.
+  - **100% Full-Height Video Viewports:** Both Live View and SD Card Footage span the full `630px` vertical app window (`1026×578` with the clip list open; **`1120×630`** when **Hide List** is tapped), using auto-hiding smoked-glass floating toolbars and scrub bars that never compress or reflow the video surface.
   - Automatic aspect ratio protection (`android.max_aspect="4.0"`) and dynamic surface layout scaling ensure video feeds are always centered with true 16:9 geometry and zero letterbox distortion.
 
 - **Complete Dashcam Remote Control:**
   - **Camera Switching:** Instantly switch between Front, Rear, and Dual live feeds.
+  - **Per-View Live Mirroring:** Toggle horizontal live mirroring (`Mirror: ON / OFF`) independently for Front, Rear, and Dual views — ideal for rearview-mirror orientation on the Rear camera while keeping recorded SD card files unflipped so license plates and timestamps remain readable.
   - **Resolution Setting:** Toggle between 4K UHD (`par=0`) and 2K QHD (`par=1`) recording modes with active badge confirmation.
   - **Microphone Control:** Toggle in-cabin audio recording with real-time status query verification (`cmd=2007`).
   - **Instant Snapshot:** Capture still photos while video recording is active (`cmd=2017` / `cmd=1001`).
@@ -100,6 +106,7 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
 
 - **Intelligent Wi-Fi Handover & Clean State Restoration:**
   - Automatically transitions between the head unit's SoftAP and client (STA) mode to connect to the dashcam's Wi-Fi network.
+  - **Custom Password & Manual SSID Fallback:** Automatically detects non-default camera passwords or custom SSIDs and prompts to select a network (or enter a hidden SSID) and save custom WPA/WPA2 credentials across launches (`Wi-Fi Setup` / long-press `Rescan` anytime).
   - Accurately restores prior Wi-Fi mode and SoftAP configuration upon exit so wireless phone projection reconnects cleanly.
   - Integrated **"Exit & Reboot"** option invokes the HMG-API root mod service (`svc/reboot.sh`) for a clean head unit restart when desired.
 
@@ -165,16 +172,17 @@ The application is specifically engineered for Gen5W 24:9 ultra-widescreen infot
    cd fitcamx-gen5w
    ```
 
-2. Run the build script:
+2. Run the build and verification suite:
    ```bash
-   python tools/build_package.py
+   python3 tools/build_package.py
+   python3 tests/run_tests.py
    ```
 
 The script will:
 1. Generate `R.java` with `aapt`.
 2. Compile Java source files targeting Java 8 (`javac --release 8`).
-3. Desugar and dex bytecode to Dalvik API 19 format using `d8`.
-4. Bundle prebuilt `libvlc.so`, `libvlcjni.so`, and `libc++_shared.so` into the APK.
+3. Shrink and dex bytecode to Dalvik API 19 format using `R8 --min-api 19` (`tools/proguard-rules.pro`).
+4. Bundle deflated (`ZIP_DEFLATED`) `libvlc.so`, `libvlcjni.so`, and `libc++_shared.so` into the APK.
 5. Zipalign and sign `Fitcamx.apk` with v1 JAR signatures (compatible with Android 4.4.2).
 6. Package and sign HMG-API and NEMESIS USB packages in `dist/`.
 
@@ -192,9 +200,10 @@ fitcamx/
 │   └── src/
 │       ├── fitcamx/app/
 │       │   ├── MainActivity.java        # Core UI controller & lifecycle coordinator
+│       │   ├── ThemeManager.java        # Material Design 3 tonal palette & API 19 shape engine
 │       │   ├── CameraClient.java        # Novatek CGI protocol client & state sync
-│       │   ├── VlcPlayerManager.java    # LibVLC lifecycle, surface views, RTSP streams
-│       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover state machine
+│       │   ├── VlcPlayerManager.java    # LibVLC lifecycle, surface views, RTSP & hflip mirror engines
+│       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover & custom PSK state machine
 │       │   ├── UsbDownloader.java       # Direct SD-to-USB chunked download worker
 │       │   ├── HmgapidClient.java       # Root daemon IPC client (LFD1 protocol)
 │       │   ├── ScreenshotHelper.java    # USB-only screenshot capture & color normalizer
@@ -213,9 +222,13 @@ fitcamx/
 │   │   └── screenshot.sh           # Root service script for USB-only framebuffer capture
 │   └── icons/                      # Head unit launcher icons
 ├── tools/
-│   ├── build_package.py            # Automated build, dexing, alignment & signing pipeline
+│   ├── build_package.py            # Automated build, R8 dexing, alignment & signing pipeline
+│   ├── proguard-rules.pro          # R8 shrinking & API 19 Dalvik compatibility rules
 │   ├── setup_android_sdk.py        # Automated SDK setup helper
 │   └── sign.py                     # Standalone package signing utility
+├── tests/
+│   ├── run_tests.py                # Automated build, JVM unit test & binary invariant runner
+│   └── FitcamUnitTests.java        # Unit & mock-HTTP integration test suite
 ├── dist/                           # Final signed release packages
 ├── AGENT_GUIDE.md                  # Comprehensive technical handbook for AI assistants & developers
 ├── DISCLAIMER.md                   # Detailed legal disclaimers, trademark & driver safety notices

@@ -1,21 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/layout_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="horizontal"
     android:background="@color/bg_dark">
 
-    <!-- ================= LEFT NAVIGATION & STATUS SIDEBAR ================= -->
+    <!-- ================= LEFT M3 NAVIGATION RAIL / SIDEBAR ================= -->
     <LinearLayout
         android:id="@+id/layout_sidebar"
-        android:layout_width="210dp"
+        android:layout_width="196dp"
         android:layout_height="match_parent"
         android:orientation="vertical"
         android:background="@color/bg_panel"
-        android:paddingLeft="12dp"
-        android:paddingRight="12dp"
-        android:paddingTop="12dp"
-        android:paddingBottom="10dp">
+        android:paddingLeft="10dp"
+        android:paddingRight="10dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="8dp">
 
         <!-- Logo / App Title (Tap to save screenshot to USB) -->
         <LinearLayout
@@ -24,12 +25,14 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp"
+            android:paddingLeft="6dp"
+            android:paddingRight="6dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
             android:clickable="true"
             android:focusable="true"
             android:background="?android:attr/selectableItemBackground"
-            android:layout_marginBottom="8dp">
+            android:layout_marginBottom="6dp">
 
             <TextView
                 android:id="@+id/tv_title"
@@ -38,70 +41,92 @@
                 android:layout_weight="1"
                 android:text="FITCAMX"
                 android:textColor="@color/accent_blue"
-                android:textSize="20sp"
+                android:textSize="19sp"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/tv_app_version"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="v0.6.1"
+                android:text="v0.7.0"
                 android:textColor="@color/text_secondary"
                 android:textSize="11sp" />
         </LinearLayout>
 
-        <!-- Status & Wi-Fi indicator -->
-        <TextView
-            android:id="@+id/tv_wifi_status"
+        <!-- Tonal Wi-Fi Status Card + Rescan Pill -->
+        <LinearLayout
+            android:id="@+id/layout_wifi_card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/status_disconnected"
-            android:textColor="@color/accent_gold"
-            android:textSize="12sp"
-            android:maxLines="2"
-            android:ellipsize="marquee"
-            android:layout_marginBottom="6dp" />
+            android:orientation="vertical"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
+            android:paddingTop="7dp"
+            android:paddingBottom="8dp"
+            android:layout_marginBottom="10dp">
 
-        <!-- Rescan Button -->
-        <Button
-            android:id="@+id/btn_rescan"
-            android:layout_width="match_parent"
-            android:layout_height="36dp"
-            android:layout_marginBottom="14dp"
-            android:text="@string/btn_rescan"
-            android:background="@color/bg_button"
-            android:textColor="@color/text_primary"
-            android:textSize="13sp" />
+            <TextView
+                android:id="@+id/tv_wifi_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/status_disconnected"
+                android:textColor="@color/accent_gold"
+                android:textSize="11sp"
+                android:maxLines="2"
+                android:ellipsize="end"
+                android:layout_marginBottom="6dp" />
+
+            <Button
+                android:id="@+id/btn_rescan"
+                style="@style/M3PillButton"
+                android:layout_width="match_parent"
+                android:layout_height="30dp"
+                android:text="@string/btn_rescan"
+                android:background="@color/bg_button"
+                android:textColor="@color/text_primary"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <!-- Navigation Section Label -->
         <TextView
+            android:id="@+id/tv_nav_section_label"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="NAVIGATION"
+            android:paddingLeft="8dp"
+            android:text="VIEW MODE"
             android:textColor="@color/text_secondary"
-            android:textSize="11sp"
-            android:layout_marginBottom="6dp" />
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
 
-        <!-- Mode Switcher Tabs -->
+        <!-- M3 Stadium Navigation Pills -->
         <Button
             android:id="@+id/btn_tab_live"
+            style="@style/M3PillButton"
             android:layout_width="match_parent"
-            android:layout_height="40dp"
-            android:layout_marginBottom="6dp"
+            android:layout_height="38dp"
+            android:gravity="left|center_vertical"
+            android:paddingLeft="14dp"
+            android:paddingRight="12dp"
+            android:layout_marginBottom="4dp"
             android:text="@string/tab_live"
             android:background="@color/accent_blue"
             android:textColor="@color/text_primary"
-            android:textSize="14sp" />
+            android:textSize="13sp" />
 
         <Button
             android:id="@+id/btn_tab_gallery"
+            style="@style/M3PillButton"
             android:layout_width="match_parent"
-            android:layout_height="40dp"
-            android:layout_marginBottom="12dp"
+            android:layout_height="38dp"
+            android:gravity="left|center_vertical"
+            android:paddingLeft="14dp"
+            android:paddingRight="12dp"
+            android:layout_marginBottom="8dp"
             android:text="@string/tab_gallery"
             android:background="@color/bg_button"
             android:textColor="@color/text_primary"
-            android:textSize="14sp" />
+            android:textSize="13sp" />
 
         <!-- Spacer -->
         <View
@@ -109,59 +134,97 @@
             android:layout_height="0dp"
             android:layout_weight="1" />
 
-        <!-- System & Log Actions -->
+        <!-- M3 Theme Switcher Pill (Tap to pick, Long-press to cycle) -->
         <Button
-            android:id="@+id/btn_export_log"
+            android:id="@+id/btn_theme"
+            style="@style/M3PillButton"
             android:layout_width="match_parent"
-            android:layout_height="36dp"
+            android:layout_height="32dp"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
             android:layout_marginBottom="6dp"
-            android:text="Export Log to USB"
-            android:background="#2e4057"
-            android:textColor="@color/accent_gold"
-            android:textStyle="bold"
+            android:text="● Ocean Blue"
+            android:background="@color/bg_button"
+            android:textColor="@color/text_primary"
             android:textSize="12sp" />
 
-        <Button
-            android:id="@+id/btn_exit_app"
+        <!-- Compact Side-by-Side System Action Pills (Log + Exit) -->
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="36dp"
-            android:layout_marginBottom="8dp"
-            android:text="@string/btn_exit"
-            android:background="@color/bg_button"
-            android:textColor="@color/accent_green"
-            android:textStyle="bold"
-            android:textSize="13sp" />
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="6dp">
 
-        <!-- Diagnostic Bar at bottom of sidebar -->
+            <Button
+                android:id="@+id/btn_export_log"
+                style="@style/M3PillButton"
+                android:layout_width="0dp"
+                android:layout_height="32dp"
+                android:layout_weight="1.05"
+                android:layout_marginRight="5dp"
+                android:paddingLeft="6dp"
+                android:paddingRight="6dp"
+                android:text="Save Log"
+                android:background="@color/bg_button"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+
+            <Button
+                android:id="@+id/btn_exit_app"
+                style="@style/M3PillButton"
+                android:layout_width="0dp"
+                android:layout_height="32dp"
+                android:layout_weight="0.95"
+                android:paddingLeft="6dp"
+                android:paddingRight="6dp"
+                android:text="@string/btn_exit"
+                android:background="@color/accent_blue"
+                android:textColor="#003258"
+                android:textStyle="bold"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- Rounded Tonal Diagnostic Card at bottom of sidebar -->
         <LinearLayout
             android:id="@+id/layout_diag_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:background="#151922"
-            android:padding="6dp">
+            android:background="#1E242C"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp"
+            android:paddingTop="5dp"
+            android:paddingBottom="5dp">
 
             <TextView
                 android:id="@+id/tv_diag_info"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Status: Initializing..."
-                android:textColor="#99aabb"
+                android:textColor="@color/text_secondary"
                 android:textSize="10sp"
                 android:maxLines="2"
-                android:ellipsize="marquee" />
+                android:ellipsize="end" />
 
             <TextView
                 android:id="@+id/tv_diag_tap_hint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="right"
-                android:text="[Diagnostics]"
+                android:text="Diagnostics ›"
                 android:textColor="@color/accent_blue"
                 android:textSize="10sp"
-                android:layout_marginTop="2dp" />
+                android:textStyle="bold"
+                android:layout_marginTop="1dp" />
         </LinearLayout>
     </LinearLayout>
+
+    <!-- Subtle M3 Outline Hairline -->
+    <View
+        android:id="@+id/divider_sidebar"
+        android:layout_width="1dp"
+        android:layout_height="match_parent"
+        android:background="@color/divider" />
 
     <!-- ================= MAIN CONTENT FRAME ================= -->
     <FrameLayout
@@ -177,7 +240,7 @@
             android:orientation="horizontal"
             android:visibility="visible">
 
-            <!-- Video Player Surface (Full 720px Height!) -->
+            <!-- Video Player Surface (100% Full Vertical Height) -->
             <FrameLayout
                 android:id="@+id/frame_live_container"
                 android:layout_width="0dp"
@@ -200,140 +263,188 @@
                     android:layout_gravity="center"
                     android:visibility="visible" />
 
-                <!-- Live Stream Banner Overlay -->
+                <!-- M3 Pill Live Stream Badge -->
                 <TextView
                     android:id="@+id/tv_stream_badge"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="top|left"
                     android:layout_margin="12dp"
-                    android:background="#99000000"
-                    android:paddingLeft="10dp"
-                    android:paddingRight="10dp"
-                    android:paddingTop="4dp"
-                    android:paddingBottom="4dp"
-                    android:text="FRONT (LIVE)"
-                    android:textColor="#ffffff"
-                    android:textSize="13sp" />
+                    android:background="#CC10141A"
+                    android:paddingLeft="12dp"
+                    android:paddingRight="12dp"
+                    android:paddingTop="5dp"
+                    android:paddingBottom="5dp"
+                    android:text="FRONT · LIVE"
+                    android:textColor="#F2F5F9"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
 
-                <!-- REC Indicator Badge -->
+                <!-- M3 Error Container Pill REC Badge -->
                 <TextView
                     android:id="@+id/tv_rec_badge"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="top|right"
                     android:layout_margin="12dp"
-                    android:background="#aaee2222"
-                    android:paddingLeft="10dp"
-                    android:paddingRight="10dp"
-                    android:paddingTop="4dp"
-                    android:paddingBottom="4dp"
+                    android:background="#93000A"
+                    android:paddingLeft="12dp"
+                    android:paddingRight="12dp"
+                    android:paddingTop="5dp"
+                    android:paddingBottom="5dp"
                     android:text="● REC"
-                    android:textColor="#ffffff"
+                    android:textColor="#FFDAD6"
                     android:textStyle="bold"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
             </FrameLayout>
 
-            <!-- Live Controls Column (Optimized & Narrowed) -->
+            <View
+                android:id="@+id/divider_live_controls"
+                android:layout_width="1dp"
+                android:layout_height="match_parent"
+                android:background="@color/divider" />
+
+            <!-- Right Camera Action Rail (M3 Filled, Tonal & Outlined Pills) -->
             <LinearLayout
                 android:id="@+id/layout_live_controls"
-                android:layout_width="150dp"
+                android:layout_width="154dp"
                 android:layout_height="match_parent"
                 android:orientation="vertical"
                 android:background="@color/bg_panel"
-                android:padding="8dp">
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp">
 
                 <TextView
+                    android:id="@+id/tv_cam_controls_label"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="CAMERA CONTROLS"
+                    android:paddingLeft="4dp"
+                    android:text="CAMERA"
                     android:textColor="@color/text_secondary"
-                    android:textSize="11sp"
+                    android:textSize="10sp"
+                    android:textStyle="bold"
                     android:layout_marginBottom="8dp" />
 
-                <!-- Multi-Mode View Selector (Front / Dual / Rear) -->
+                <!-- Multi-Mode View Selector (Primary Filled Pill) -->
                 <Button
                     android:id="@+id/btn_toggle_cam"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="38dp"
                     android:layout_marginBottom="6dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/accent_blue"
                     android:text="View: FRONT"
-                    android:textColor="#ffffff"
+                    android:textColor="#003258"
                     android:textStyle="bold"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
-                <!-- Take Snapshot -->
+                <!-- Horizontal Mirror Toggle (Per-View Mode, Ideal for Rearview Mirroring) -->
+                <Button
+                    android:id="@+id/btn_mirror_live"
+                    style="@style/M3PillButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_marginBottom="6dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
+                    android:background="@color/bg_button"
+                    android:text="Mirror: OFF"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp" />
+
+                <!-- Take Snapshot (Secondary Tonal Pill) -->
                 <Button
                     android:id="@+id/btn_snapshot"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="38dp"
                     android:layout_marginBottom="6dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/bg_button"
                     android:text="@string/btn_snapshot"
                     android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
-                <!-- Emergency Lock Clip -->
+                <!-- Emergency Lock Clip (Tertiary Tonal Pill) -->
                 <Button
                     android:id="@+id/btn_emergency_lock"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="38dp"
                     android:layout_marginBottom="6dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/accent_gold"
                     android:text="@string/btn_lock"
                     android:textColor="#000000"
                     android:textStyle="bold"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <!-- Mic Mute / Unmute -->
                 <Button
                     android:id="@+id/btn_toggle_mic"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="38dp"
                     android:layout_marginBottom="6dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/bg_button"
                     android:text="@string/btn_mic"
                     android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
-                <!-- Manual Record Toggle -->
+                <!-- Manual Record Toggle (Error Container Pill) -->
                 <Button
                     android:id="@+id/btn_toggle_record"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="38dp"
                     android:layout_marginBottom="6dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/accent_red"
                     android:text="Stop Recording"
-                    android:textColor="#ffffff"
+                    android:textColor="#FFDAD6"
                     android:textStyle="bold"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <View
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1" />
 
-                <!-- Camera Recording Resolution Toggle (H.264 / H.265) -->
+                <!-- Camera Recording Resolution Toggle (Outlined Pill) -->
                 <Button
                     android:id="@+id/btn_camera_res"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="36dp"
-                    android:layout_marginBottom="4dp"
+                    android:layout_height="34dp"
+                    android:layout_marginBottom="5dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/bg_button"
                     android:text="Rec: 4K UHD"
-                    android:textColor="@color/accent_gold"
-                    android:textSize="12sp" />
+                    android:textColor="@color/accent_blue"
+                    android:textSize="11sp" />
 
                 <!-- Time Sync Button -->
                 <Button
                     android:id="@+id/btn_sync_time"
+                    style="@style/M3PillButton"
                     android:layout_width="match_parent"
-                    android:layout_height="36dp"
+                    android:layout_height="34dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:background="@color/bg_button"
                     android:text="Sync Clock"
                     android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:textSize="11sp" />
             </LinearLayout>
         </LinearLayout>
 
@@ -345,14 +456,17 @@
             android:orientation="horizontal"
             android:visibility="gone">
 
-            <!-- Left: Clips List Column (Collapsible / Hidable) -->
+            <!-- Left: M3 Clips Browser Column (Collapsible) -->
             <LinearLayout
                 android:id="@+id/layout_gallery_list_column"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
-                android:layout_weight="1.0"
+                android:layout_weight="0.88"
                 android:orientation="vertical"
-                android:padding="10dp"
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:background="@color/bg_panel">
 
                 <!-- Title & Refresh Row -->
@@ -368,52 +482,56 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Footage on SD Card (Loading...)"
+                        android:singleLine="true"
+                        android:ellipsize="end"
+                        android:text="SD Card (Loading...)"
                         android:textColor="@color/text_secondary"
-                        android:textSize="13sp" />
+                        android:textStyle="bold"
+                        android:textSize="12sp" />
 
                     <Button
                         android:id="@+id/btn_refresh_gallery"
+                        style="@style/M3PillButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="34dp"
-                        android:paddingLeft="10dp"
-                        android:paddingRight="10dp"
-                        android:text="@string/btn_refresh"
+                        android:layout_height="30dp"
+                        android:paddingLeft="12dp"
+                        android:paddingRight="12dp"
+                        android:text="Reload"
                         android:background="@color/bg_button"
                         android:textColor="@color/text_primary"
-                        android:textSize="12sp" />
+                        android:textSize="11sp" />
                 </LinearLayout>
 
-                <!-- Filter Chips Row -->
+                <!-- M3 Filter Chips Row (8dp radius) -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
-                    android:layout_marginBottom="6dp">
+                    android:layout_marginBottom="8dp">
 
                     <Button
                         android:id="@+id/btn_filter_all"
+                        style="@style/M3PillButton"
                         android:layout_width="0dp"
-                        android:layout_height="32dp"
-                        android:layout_weight="0.75"
+                        android:layout_height="30dp"
+                        android:layout_weight="0.78"
                         android:layout_marginRight="4dp"
-                        android:paddingLeft="4dp"
-                        android:paddingRight="4dp"
-                        android:singleLine="true"
+                        android:paddingLeft="3dp"
+                        android:paddingRight="3dp"
                         android:background="@color/accent_blue"
-                        android:text="All"
+                        android:text="✓ All"
                         android:textColor="#ffffff"
                         android:textSize="11sp" />
 
                     <Button
                         android:id="@+id/btn_filter_front"
+                        style="@style/M3PillButton"
                         android:layout_width="0dp"
-                        android:layout_height="32dp"
-                        android:layout_weight="0.9"
+                        android:layout_height="30dp"
+                        android:layout_weight="0.92"
                         android:layout_marginRight="4dp"
-                        android:paddingLeft="4dp"
-                        android:paddingRight="4dp"
-                        android:singleLine="true"
+                        android:paddingLeft="3dp"
+                        android:paddingRight="3dp"
                         android:background="@color/bg_button"
                         android:text="Front"
                         android:textColor="@color/text_primary"
@@ -421,13 +539,13 @@
 
                     <Button
                         android:id="@+id/btn_filter_rear"
+                        style="@style/M3PillButton"
                         android:layout_width="0dp"
-                        android:layout_height="32dp"
-                        android:layout_weight="0.85"
+                        android:layout_height="30dp"
+                        android:layout_weight="0.86"
                         android:layout_marginRight="4dp"
-                        android:paddingLeft="4dp"
-                        android:paddingRight="4dp"
-                        android:singleLine="true"
+                        android:paddingLeft="3dp"
+                        android:paddingRight="3dp"
                         android:background="@color/bg_button"
                         android:text="Rear"
                         android:textColor="@color/text_primary"
@@ -435,13 +553,13 @@
 
                     <Button
                         android:id="@+id/btn_filter_locked"
+                        style="@style/M3PillButton"
                         android:layout_width="0dp"
-                        android:layout_height="32dp"
-                        android:layout_weight="1.3"
+                        android:layout_height="30dp"
+                        android:layout_weight="1.34"
                         android:layout_marginRight="4dp"
-                        android:paddingLeft="4dp"
-                        android:paddingRight="4dp"
-                        android:singleLine="true"
+                        android:paddingLeft="3dp"
+                        android:paddingRight="3dp"
                         android:background="@color/bg_button"
                         android:text="Emergency"
                         android:textColor="@color/text_primary"
@@ -449,12 +567,12 @@
 
                     <Button
                         android:id="@+id/btn_filter_photos"
+                        style="@style/M3PillButton"
                         android:layout_width="0dp"
-                        android:layout_height="32dp"
+                        android:layout_height="30dp"
                         android:layout_weight="1.0"
-                        android:paddingLeft="4dp"
-                        android:paddingRight="4dp"
-                        android:singleLine="true"
+                        android:paddingLeft="3dp"
+                        android:paddingRight="3dp"
                         android:background="@color/bg_button"
                         android:text="Photos"
                         android:textColor="@color/text_primary"
@@ -466,8 +584,10 @@
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1"
-                    android:divider="@color/divider"
-                    android:dividerHeight="1dp" />
+                    android:divider="@android:color/transparent"
+                    android:dividerHeight="5dp"
+                    android:listSelector="@android:color/transparent"
+                    android:cacheColorHint="@android:color/transparent" />
 
                 <TextView
                     android:id="@+id/tv_empty_gallery"
@@ -475,41 +595,80 @@
                     android:layout_height="0dp"
                     android:layout_weight="1"
                     android:gravity="center"
+                    android:padding="16dp"
                     android:text="@string/no_clips"
                     android:textColor="@color/text_secondary"
-                    android:textSize="16sp"
+                    android:textSize="14sp"
                     android:visibility="gone" />
             </LinearLayout>
 
-            <!-- Right: Video Preview Column (Expands to 100% full screen when list is hidden!) -->
-            <LinearLayout
-                android:id="@+id/layout_gallery_preview_column"
+            <View
+                android:id="@+id/divider_gallery_columns"
+                android:layout_width="1dp"
+                android:layout_height="match_parent"
+                android:background="@color/divider" />
+
+            <!-- Right: 100% FULL VERTICAL HEIGHT Video / Photo Viewport -->
+            <FrameLayout
+                android:id="@+id/frame_gallery_container"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
-                android:layout_weight="1.4"
-                android:orientation="vertical"
-                android:background="#000000">
+                android:layout_weight="1.52"
+                android:background="#000000"
+                android:clickable="true">
 
-                <!-- Header Bar above video: Controls & Fullscreen Toggle -->
+                <!-- LibVLC Direct Hardware Accelerated Surface (Auto-scaled & Centered across full 630px height!) -->
+                <SurfaceView
+                    android:id="@+id/surface_gallery"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:layout_gravity="center"
+                    android:visibility="gone" />
+
+                <!-- Still Photo Viewer (SD Card Snapshots across full 630px height!) -->
+                <ImageView
+                    android:id="@+id/iv_gallery_photo"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:layout_gravity="center"
+                    android:scaleType="fitCenter"
+                    android:visibility="gone" />
+
+                <ProgressBar
+                    android:id="@+id/pb_gallery_loading"
+                    android:layout_width="54dp"
+                    android:layout_height="54dp"
+                    android:layout_gravity="center"
+                    android:visibility="gone" />
+
+                <!-- Floating Top M3 Smoked-Glass Pill Toolbar (Auto-hides during active video playback) -->
                 <LinearLayout
+                    android:id="@+id/layout_gallery_top_overlay"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_gravity="top"
+                    android:layout_marginLeft="12dp"
+                    android:layout_marginRight="12dp"
+                    android:layout_marginTop="8dp"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
-                    android:paddingLeft="10dp"
-                    android:paddingRight="10dp"
-                    android:paddingTop="6dp"
-                    android:paddingBottom="6dp"
-                    android:background="@color/bg_panel">
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
+                    android:paddingTop="5dp"
+                    android:paddingBottom="5dp"
+                    android:background="#CC10141A"
+                    android:clickable="true"
+                    android:visibility="visible">
 
-                    <!-- Hide / Show List Toggle Button -->
+                    <!-- Hide / Show List Toggle Pill -->
                     <Button
                         android:id="@+id/btn_toggle_gallery_list"
+                        style="@style/M3PillButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="36dp"
+                        android:layout_height="32dp"
                         android:paddingLeft="12dp"
                         android:paddingRight="12dp"
-                        android:layout_marginRight="8dp"
+                        android:layout_marginRight="10dp"
                         android:background="@color/accent_blue"
                         android:text="Hide List"
                         android:textColor="#ffffff"
@@ -522,19 +681,21 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:text="Select a clip to review"
-                        android:textColor="@color/text_primary"
-                        android:textSize="14sp"
+                        android:textColor="#F2F5F9"
+                        android:textSize="13sp"
                         android:textStyle="bold"
-                        android:maxLines="1"
+                        android:singleLine="true"
                         android:ellipsize="middle" />
 
-                    <!-- Playback Speed Selector (4K: 0.33x / 0.5x | 1080p: 1.0x / 0.5x / 0.33x) -->
+                    <!-- Playback Speed Selector Pill -->
                     <Button
                         android:id="@+id/btn_playback_rate"
+                        style="@style/M3PillButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="36dp"
-                        android:paddingLeft="10dp"
-                        android:paddingRight="10dp"
+                        android:layout_height="32dp"
+                        android:paddingLeft="11dp"
+                        android:paddingRight="11dp"
+                        android:layout_marginLeft="8dp"
                         android:layout_marginRight="6dp"
                         android:background="@color/bg_button"
                         android:text="--"
@@ -543,88 +704,71 @@
                         android:textStyle="bold"
                         android:textSize="12sp" />
 
-                    <!-- Play / Pause Button -->
+                    <!-- Play / Pause Pill -->
                     <Button
                         android:id="@+id/btn_play_clip"
+                        style="@style/M3PillButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="36dp"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
+                        android:layout_height="32dp"
+                        android:paddingLeft="13dp"
+                        android:paddingRight="13dp"
                         android:layout_marginRight="6dp"
                         android:background="@color/bg_button"
-                        android:text="Play Preview"
-                        android:textColor="@color/text_primary"
+                        android:text="Play"
+                        android:textColor="#F2F5F9"
                         android:textSize="12sp" />
 
-                    <!-- Save to USB Button -->
+                    <!-- Save to USB Pill -->
                     <Button
                         android:id="@+id/btn_download_to_usb"
+                        style="@style/M3PillButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="36dp"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
+                        android:layout_height="32dp"
+                        android:paddingLeft="13dp"
+                        android:paddingRight="13dp"
                         android:background="@color/accent_green"
                         android:text="@string/btn_download_usb"
-                        android:textColor="#ffffff"
+                        android:textColor="#003258"
                         android:textStyle="bold"
                         android:textSize="12sp" />
                 </LinearLayout>
 
-                <!-- Video Surface Area (Full Vertical Space!) -->
-                <FrameLayout
-                    android:id="@+id/frame_gallery_container"
+                <!-- Floating Bottom M3 Smoked-Glass Scrub & Info Card (Auto-hides during active video playback) -->
+                <LinearLayout
+                    android:id="@+id/layout_gallery_seek_overlay"
                     android:layout_width="match_parent"
-                    android:layout_height="0dp"
-                    android:layout_weight="1"
-                    android:background="#000000">
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="bottom"
+                    android:layout_marginLeft="12dp"
+                    android:layout_marginRight="12dp"
+                    android:layout_marginBottom="8dp"
+                    android:orientation="vertical"
+                    android:background="#CC10141A"
+                    android:paddingLeft="14dp"
+                    android:paddingRight="14dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="7dp"
+                    android:clickable="true"
+                    android:visibility="visible">
 
-                    <!-- LibVLC Direct Hardware Accelerated Surface (Auto-scaled & Centered) -->
-                    <SurfaceView
-                        android:id="@+id/surface_gallery"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:layout_gravity="center"
-                        android:visibility="gone" />
-
-                    <!-- Still Photo Viewer (SD Card Snapshots) -->
-                    <ImageView
-                        android:id="@+id/iv_gallery_photo"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:layout_gravity="center"
-                        android:scaleType="fitCenter"
-                        android:visibility="gone" />
-
-                    <ProgressBar
-                        android:id="@+id/pb_gallery_loading"
-                        android:layout_width="54dp"
-                        android:layout_height="54dp"
-                        android:layout_gravity="center"
-                        android:visibility="gone" />
-
-                    <!-- Translucent Scrub Bar Overlay (Auto-hides during playback; tap video to toggle) -->
+                    <!-- Scrubbing Row (Hidden when viewing Still Photos) -->
                     <LinearLayout
-                        android:id="@+id/layout_gallery_seek_overlay"
+                        android:id="@+id/layout_seek_bar_row"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_gravity="bottom"
                         android:orientation="horizontal"
                         android:gravity="center_vertical"
-                        android:background="#B3000000"
-                        android:paddingLeft="12dp"
-                        android:paddingRight="14dp"
-                        android:paddingTop="4dp"
-                        android:paddingBottom="4dp"
-                        android:clickable="true"
                         android:visibility="gone">
 
                         <SeekBar
                             android:id="@+id/sb_gallery_seek"
                             android:layout_width="0dp"
-                            android:layout_height="38dp"
+                            android:layout_height="30dp"
+                            android:minHeight="6dp"
+                            android:maxHeight="6dp"
                             android:layout_weight="1"
-                            android:paddingTop="4dp"
-                            android:paddingBottom="4dp"
+                            android:paddingLeft="8dp"
+                            android:paddingRight="8dp"
                             android:max="1000"
                             android:progress="0"
                             android:enabled="false" />
@@ -635,33 +779,26 @@
                             android:layout_height="wrap_content"
                             android:layout_marginLeft="8dp"
                             android:text="0%"
-                            android:textColor="#ffffff"
+                            android:textColor="#F2F5F9"
                             android:textSize="12sp"
                             android:textStyle="bold" />
                     </LinearLayout>
-                </FrameLayout>
 
-                <!-- Slim Footer Bar below video: Download Progress, Status & Details -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:paddingLeft="10dp"
-                    android:paddingRight="10dp"
-                    android:paddingTop="3dp"
-                    android:paddingBottom="3dp"
-                    android:background="@color/bg_panel">
-
+                    <!-- M3 Rounded USB Transfer Progress Bar -->
                     <ProgressBar
                         android:id="@+id/pb_download_progress"
                         style="?android:attr/progressBarStyleHorizontal"
                         android:layout_width="match_parent"
-                        android:layout_height="10dp"
+                        android:layout_height="6dp"
+                        android:minHeight="6dp"
+                        android:maxHeight="6dp"
                         android:max="100"
                         android:progress="0"
                         android:visibility="gone"
-                        android:layout_marginBottom="2dp" />
+                        android:layout_marginTop="3dp"
+                        android:layout_marginBottom="4dp" />
 
+                    <!-- Single-Line Clip Details + USB Status Row -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -673,30 +810,36 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="Size: - | Date: -"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="12sp" />
-
-                        <TextView
-                            android:id="@+id/tv_usb_status"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="USB Drive: Checking..."
-                            android:textColor="@color/accent_gold"
-                            android:textSize="12sp" />
+                            android:singleLine="true"
+                            android:ellipsize="end"
+                            android:text="Tap any clip or photo to preview"
+                            android:textColor="#CBD5E1"
+                            android:textSize="11sp" />
 
                         <TextView
                             android:id="@+id/tv_download_stats"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text=""
-                            android:textColor="@color/accent_green"
-                            android:textSize="12sp"
+                            android:textColor="#6DD58C"
+                            android:textStyle="bold"
+                            android:textSize="11sp"
                             android:layout_marginLeft="8dp"
                             android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/tv_usb_status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:singleLine="true"
+                            android:layout_marginLeft="10dp"
+                            android:text="USB: Checking..."
+                            android:textColor="#FFB951"
+                            android:textStyle="bold"
+                            android:textSize="11sp" />
                     </LinearLayout>
                 </LinearLayout>
-            </LinearLayout>
+            </FrameLayout>
         </LinearLayout>
     </FrameLayout>
 </LinearLayout>

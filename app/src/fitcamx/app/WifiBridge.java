@@ -24,7 +24,10 @@ import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
@@ -65,11 +68,13 @@ public class WifiBridge {
     private static final String KEY_KNOWN_IP = "ip";
     private static final String KEY_KNOWN_SOC = "soc";
     private static final String KEY_KNOWN_PORT = "port";
+    private static final String KEY_CUSTOM_PASS_PREFIX = "pwd_";
 
     private static final long AP_DISABLE_FALLBACK_MS = 3500L;
     private static final long ASSOC_WATCHDOG_MS = 5500L;
     private static final long FAST_CONNECT_FALLBACK_MS = 8500L;
-    private static final int MAX_ASSOC_WATCHDOG_RETRIES = 3;
+    public static final int MAX_ASSOC_WATCHDOG_RETRIES = 3;
+    public static final int NO_MATCH_PROMPT_SCAN_THRESHOLD = 4;
 
     public static final int SEC_WPA2_CCMP = 0;
     public static final int SEC_WPA_MIXED = 1;
@@ -106,6 +111,10 @@ public class WifiBridge {
     private int assocRetryCount = 0;
     private int scanAttempts = 0;
     private int authErrorCount = 0;
+    private boolean handshakeSeenInAttempt = false;
+    private int handshakeDropCount = 0;
+    private boolean manualPromptShownThisSession = false;
+    private final Set<String> pausedAutoSsids = new HashSet<String>();
     private volatile boolean isProbingCamera = false;
     private volatile boolean lastProbeVerified = false;
     private final List<ScanResult> lastScanResults = new ArrayList<ScanResult>();
@@ -115,6 +124,7 @@ public class WifiBridge {
         void onConnected(String cameraIp, String ssid, CameraClient.SocType socType, int httpPort, String diagDetails);
         void onDisconnected();
         void onScanResultsUpdated(List<ScanResult> results);
+        void onManualSetupNeeded(String failedSsid, String reason, List<ScanResult> availableNetworks);
     }
 
     private Listener listener;
@@ -199,9 +209,171 @@ public class WifiBridge {
         try {
             SharedPreferences prefs = context.getSharedPreferences(PREFS_KNOWN_CAMERA, Context.MODE_PRIVATE);
             if (prefs != null) {
-                prefs.edit().clear().apply();
+                prefs.edit()
+                        .remove(KEY_KNOWN_SSID)
+                        .remove(KEY_KNOWN_BSSID)
+                        .remove(KEY_KNOWN_IP)
+                        .remove(KEY_KNOWN_SOC)
+                        .remove(KEY_KNOWN_PORT)
+                        .apply();
             }
         } catch (Exception ignored) {}
+    }
+
+    public String getKnownSsid() {
+        return knownSsid != null ? knownSsid : "";
+    }
+
+    private static String buildPasswordKey(String ssid) {
+        return KEY_CUSTOM_PASS_PREFIX + cleanSsid(ssid);
+    }
+
+    /**
+     * Returns any user-saved custom password for the given SSID, falling back to DEFAULT_PASSWORD.
+     */
+    public String getSavedPasswordForSsid(String ssid) {
+        String cleaned = cleanSsid(ssid);
+        if (cleaned.isEmpty()) return DEFAULT_PASSWORD;
+        try {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_KNOWN_CAMERA, Context.MODE_PRIVATE);
+            if (prefs != null) {
+                String saved = prefs.getString(buildPasswordKey(cleaned), null);
+                if (saved != null && !saved.isEmpty()) {
+                    return saved;
+                }
+            }
+        } catch (Exception ignored) {}
+        return DEFAULT_PASSWORD;
+    }
+
+    public boolean hasCustomPasswordForSsid(String ssid) {
+        String cleaned = cleanSsid(ssid);
+        if (cleaned.isEmpty()) return false;
+        try {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_KNOWN_CAMERA, Context.MODE_PRIVATE);
+            if (prefs != null) {
+                String saved = prefs.getString(buildPasswordKey(cleaned), null);
+                return saved != null && !saved.isEmpty() && !DEFAULT_PASSWORD.equals(saved);
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /**
+     * Saves a custom Wi-Fi password for the specified SSID strictly when changed (zero redundant flash writes).
+     */
+    public void savePasswordForSsid(String ssid, String password) {
+        String cleaned = cleanSsid(ssid);
+        if (cleaned.isEmpty() || password == null) return;
+        try {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_KNOWN_CAMERA, Context.MODE_PRIVATE);
+            if (prefs == null) return;
+            String key = buildPasswordKey(cleaned);
+            String existing = prefs.getString(key, null);
+            if (DEFAULT_PASSWORD.equals(password)) {
+                if (existing != null) {
+                    prefs.edit().remove(key).apply();
+                }
+            } else if (!password.equals(existing)) {
+                prefs.edit().putString(key, password).apply();
+                DebugLogger.log("WIFI_CACHE", "Saved custom password for SSID=\"" + cleaned + "\" (len=" + password.length() + ")");
+            }
+        } catch (Exception e) {
+            DebugLogger.log("WIFI_CACHE", "Could not persist custom Wi-Fi password: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Pure helper: validates WPA/WPA2 PSK length (8-63 ASCII chars or 64 hex chars) or Open network.
+     */
+    public static boolean isValidWifiPassword(String password, int securityMode) {
+        if (securityMode == SEC_OPEN) {
+            return true;
+        }
+        if (password == null) {
+            return false;
+        }
+        int len = password.length();
+        if (len >= 8 && len <= 63) {
+            return true;
+        }
+        if (len == 64) {
+            for (int i = 0; i < 64; i++) {
+                char c = password.charAt(i);
+                boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!hex) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Pure helper: formats a WPA/WPA2 preSharedKey for Android WifiConfiguration
+     * (quotes 8-63 char ASCII passphrases; leaves 64-digit raw hex keys unquoted).
+     */
+    public static String formatPreSharedKey(String password) {
+        if (password == null) return "\"" + DEFAULT_PASSWORD + "\"";
+        if (password.length() == 64 && isValidWifiPassword(password, SEC_WPA2_CCMP)) {
+            boolean allHex = true;
+            for (int i = 0; i < 64; i++) {
+                char c = password.charAt(i);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                    allHex = false;
+                    break;
+                }
+            }
+            if (allHex) return password;
+        }
+        String escaped = password.replace("\\", "\\\\").replace("\"", "\\\"");
+        return "\"" + escaped + "\"";
+    }
+
+    /**
+     * Pure helper: decides when automatic/default credentials have failed and manual SSID/password
+     * fallback should be surfaced instead of retrying a rejected password indefinitely.
+     */
+    public static boolean shouldTriggerAuthFallback(int explicitAuthErrors, int handshakeDisconnects, int exhaustedAssocRetries) {
+        return explicitAuthErrors >= 2
+                || handshakeDisconnects >= 2
+                || exhaustedAssocRetries >= MAX_ASSOC_WATCHDOG_RETRIES;
+    }
+
+    /**
+     * Pure helper: deduplicates visible SSIDs while pinning any failed/remembered/dashcam-matching
+     * SSIDs to the top of the manual network selector.
+     */
+    public static List<String> prioritizeSsidsForPicker(List<String> rawSsids, String failedSsid, String rememberedSsid) {
+        List<String> pinned = new ArrayList<String>();
+        List<String> others = new ArrayList<String>();
+        if (rawSsids == null) return pinned;
+
+        String cleanFailed = cleanSsid(failedSsid);
+        String cleanRem = cleanSsid(rememberedSsid);
+        Set<String> seenLower = new HashSet<String>();
+
+        for (String raw : rawSsids) {
+            String s = cleanSsid(raw);
+            if (s.isEmpty()) continue;
+            String low = s.toLowerCase(Locale.US);
+            if (seenLower.contains(low)) continue;
+            seenLower.add(low);
+
+            boolean isPriority = (!cleanFailed.isEmpty() && s.equalsIgnoreCase(cleanFailed))
+                    || (!cleanRem.isEmpty() && s.equalsIgnoreCase(cleanRem))
+                    || isMatchingSsid(s);
+            if (isPriority) {
+                if (!cleanFailed.isEmpty() && s.equalsIgnoreCase(cleanFailed)) {
+                    pinned.add(0, s);
+                } else {
+                    pinned.add(s);
+                }
+            } else {
+                others.add(s);
+            }
+        }
+        pinned.addAll(others);
+        return pinned;
     }
 
     public void setListener(Listener listener) {
@@ -223,6 +395,10 @@ public class WifiBridge {
         assocRetryCount = 0;
         scanAttempts = 0;
         authErrorCount = 0;
+        handshakeSeenInAttempt = false;
+        handshakeDropCount = 0;
+        manualPromptShownThisSession = false;
+        pausedAutoSsids.clear();
         stopWatchdogs();
 
         if (!initialStateRecorded) {
@@ -581,10 +757,11 @@ public class WifiBridge {
             }
 
             if (assocRetryCount >= MAX_ASSOC_WATCHDOG_RETRIES) {
-                DebugLogger.log("WIFI_RETRY", "Association retries exhausted for \"" + targetSsid + "\"; resuming scan loop");
-                isConnectingToTarget = false;
-                isFastConnectingSaved = false;
-                startScanLoop();
+                String failed = targetSsid;
+                DebugLogger.log("WIFI_RETRY", "Association retries exhausted for \"" + failed + "\"; offering manual SSID/password setup");
+                triggerAuthOrConnectionFallback(failed,
+                        "Could not connect automatically to \"" + cleanSsid(failed) + "\". Verify the camera is powered on or enter its Wi-Fi password.",
+                        false);
                 return;
             }
 
@@ -656,7 +833,8 @@ public class WifiBridge {
         if (currentInfo != null && currentInfo.getSSID() != null) {
             String ssid = cleanSsid(currentInfo.getSSID());
             DhcpInfo dhcp = wifiManager.getDhcpInfo();
-            boolean explicitTarget = (targetSsid != null && cleanSsid(targetSsid).equalsIgnoreCase(ssid));
+            boolean explicitTarget = (targetSsid != null && cleanSsid(targetSsid).equalsIgnoreCase(ssid))
+                    || (!knownSsid.isEmpty() && knownSsid.equalsIgnoreCase(ssid));
             if ((isMatchingSsid(ssid) || explicitTarget || lastProbeVerified) && dhcp != null && dhcp.ipAddress != 0) {
                 notifyStatus("Re-checking camera connection on " + ssid + "...");
                 startDhcpAndCameraProbe(ssid);
@@ -666,6 +844,10 @@ public class WifiBridge {
 
         authErrorCount = 0;
         assocRetryCount = 0;
+        handshakeSeenInAttempt = false;
+        handshakeDropCount = 0;
+        manualPromptShownThisSession = false;
+        pausedAutoSsids.clear();
         isFastConnectingSaved = false;
         isConnectingToTarget = false;
         isProbingCamera = false;
@@ -764,15 +946,17 @@ public class WifiBridge {
                     }
                 } else {
                     String altSsid = findAlternateDashcamInScan(scannedNames, targetSsid);
-                    if (altSsid != null) {
+                    if (altSsid != null && !isAutoPaused(altSsid)) {
                         ScanResult altScan = findScanResultBySsid(altSsid);
                         DebugLogger.log("WIFI_FAST", "Saved dashcam \"" + targetSsid + "\" absent, found \"" + altSsid + "\"; switching target");
                         stopWatchdogs();
                         isFastConnectingSaved = false;
                         targetSsid = altSsid;
                         assocRetryCount = 0;
+                        handshakeSeenInAttempt = false;
+                        handshakeDropCount = 0;
                         notifyStatus("Found " + altSsid + ". Connecting...");
-                        connectToSsid(altSsid, DEFAULT_PASSWORD, altScan != null ? altScan.capabilities : null, false);
+                        connectToSsid(altSsid, getSavedPasswordForSsid(altSsid), altScan != null ? altScan.capabilities : null, false);
                     }
                 }
             }
@@ -806,10 +990,10 @@ public class WifiBridge {
                 sb.append(name);
             }
             if (!knownSsid.isEmpty() && rememberedMatch == null && r.SSID != null
-                    && cleanSsid(r.SSID).equalsIgnoreCase(knownSsid)) {
+                    && cleanSsid(r.SSID).equalsIgnoreCase(knownSsid) && !isAutoPaused(r.SSID)) {
                 rememberedMatch = r;
             }
-            if (firstDashcamMatch == null && isMatchingSsid(r.SSID)) {
+            if (firstDashcamMatch == null && isMatchingSsid(r.SSID) && !isAutoPaused(r.SSID)) {
                 firstDashcamMatch = r;
             }
         }
@@ -821,15 +1005,27 @@ public class WifiBridge {
             isConnectingToTarget = true;
             isFastConnectingSaved = false;
             assocRetryCount = 0;
+            handshakeSeenInAttempt = false;
+            handshakeDropCount = 0;
             DebugLogger.log("WIFI_SCAN", "Matched target dashcam: " + targetMatch.SSID + " (" + targetMatch.level + " dBm)");
             notifyStatus("Found " + targetMatch.SSID + " (" + targetMatch.level + " dBm). Connecting...");
-            connectToSsid(targetMatch.SSID, DEFAULT_PASSWORD, targetMatch.capabilities, false);
+            connectToSsid(targetMatch.SSID, getSavedPasswordForSsid(targetMatch.SSID), targetMatch.capabilities, false);
         } else {
             notifyStatus("Found " + lastScanResults.size() + " networks [" + sb.toString() + "]. Searching for dashcam...");
+            if (pausedAutoSsids.isEmpty() && !manualPromptShownThisSession && scanAttempts >= NO_MATCH_PROMPT_SCAN_THRESHOLD) {
+                manualPromptShownThisSession = true;
+                DebugLogger.log("WIFI_SCAN", "No standard dashcam SSID detected after " + scanAttempts + " scans; offering manual SSID selection");
+                notifyManualSetupNeeded(null, "No default dashcam Wi-Fi network was auto-detected. Select your camera's Wi-Fi network below.");
+            }
         }
     }
 
-    private ScanResult findScanResultBySsid(String ssid) {
+    private boolean isAutoPaused(String ssid) {
+        String c = cleanSsid(ssid);
+        return !c.isEmpty() && pausedAutoSsids.contains(c.toLowerCase(Locale.US));
+    }
+
+    public ScanResult findScanResultBySsid(String ssid) {
         String target = cleanSsid(ssid);
         for (ScanResult r : lastScanResults) {
             if (r != null && r.SSID != null && cleanSsid(r.SSID).equalsIgnoreCase(target)) {
@@ -840,17 +1036,33 @@ public class WifiBridge {
     }
 
     public void connectToSpecificSsid(String ssid, String password) {
+        String cleaned = cleanSsid(ssid);
+        if (cleaned.isEmpty()) return;
         stopScanLoop();
         stopWatchdogs();
-        targetSsid = ssid;
+        pausedAutoSsids.clear();
+        manualPromptShownThisSession = true;
+        targetSsid = cleaned;
+        knownSsid = cleaned;
         isConnectingToTarget = true;
         isFastConnectingSaved = false;
         authErrorCount = 0;
         assocRetryCount = 0;
-        notifyStatus("Connecting to " + ssid + "...");
-        ScanResult sr = findScanResultBySsid(ssid);
-        connectToSsid(ssid, password != null ? password : DEFAULT_PASSWORD,
-                sr != null ? sr.capabilities : null, password != null);
+        handshakeSeenInAttempt = false;
+        handshakeDropCount = 0;
+
+        ScanResult sr = findScanResultBySsid(cleaned);
+        String caps = (sr != null) ? sr.capabilities : null;
+        int secMode = classifySecurityMode(caps);
+        String effectivePassword = (password != null && !password.isEmpty())
+                ? password
+                : getSavedPasswordForSsid(cleaned);
+        if (secMode != SEC_OPEN && password != null && !password.isEmpty()) {
+            savePasswordForSsid(cleaned, password);
+        }
+
+        notifyStatus("Connecting to " + cleaned + "...");
+        connectToSsid(cleaned, effectivePassword, caps, true);
     }
 
     private void connectToSsid(String ssid, String password, String capabilities, boolean forceUpdateCredentials) {
@@ -877,13 +1089,13 @@ public class WifiBridge {
             if (secMode == SEC_OPEN) {
                 conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
             } else if (secMode == SEC_WPA2_CCMP) {
-                conf.preSharedKey = "\"" + password + "\"";
+                conf.preSharedKey = formatPreSharedKey(password);
                 conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
                 conf.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
                 conf.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
                 conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
             } else {
-                conf.preSharedKey = "\"" + password + "\"";
+                conf.preSharedKey = formatPreSharedKey(password);
                 conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
                 conf.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
                 conf.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
@@ -929,6 +1141,48 @@ public class WifiBridge {
         }
     }
 
+    private void triggerAuthOrConnectionFallback(final String failedSsid, final String reason, boolean removeRejectedProfile) {
+        stopWatchdogs();
+        isConnectingToTarget = false;
+        isFastConnectingSaved = false;
+        handshakeSeenInAttempt = false;
+
+        String cleanFailed = cleanSsid(failedSsid);
+        if (!cleanFailed.isEmpty()) {
+            pausedAutoSsids.add(cleanFailed.toLowerCase(Locale.US));
+        }
+
+        if (removeRejectedProfile && connectedNetworkId != -1) {
+            try {
+                wifiManager.disableNetwork(connectedNetworkId);
+                wifiManager.removeNetwork(connectedNetworkId);
+                wifiManager.saveConfiguration();
+            } catch (Exception ignored) {}
+            connectedNetworkId = -1;
+        }
+        if (removeRejectedProfile && !cleanFailed.isEmpty()) {
+            clearKnownCameraIfMatches(cleanFailed);
+        }
+
+        String displayTarget = !cleanFailed.isEmpty() ? cleanFailed : "dashcam";
+        notifyStatus("Password / setup needed for " + displayTarget + " — Tap Wi-Fi Setup");
+        startScanLoop();
+        notifyManualSetupNeeded(cleanFailed.isEmpty() ? null : cleanFailed, reason);
+    }
+
+    private void notifyManualSetupNeeded(final String failedSsid, final String reason) {
+        if (listener == null) return;
+        final List<ScanResult> snapshot = new ArrayList<ScanResult>(lastScanResults);
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (listener != null && !isRestoring) {
+                    listener.onManualSetupNeeded(failedSsid, reason, snapshot);
+                }
+            }
+        });
+    }
+
     private void handleSupplicantState(SupplicantState state, int error) {
         if (state == null || isRestoring) return;
         Log.d(TAG, "SupplicantState=" + state + ", error=" + error);
@@ -936,22 +1190,12 @@ public class WifiBridge {
         if (error == WifiManager.ERROR_AUTHENTICATING) {
             authErrorCount++;
             Log.w(TAG, "Supplicant reported auth error (count=" + authErrorCount + ")");
-            if (authErrorCount >= 2) {
-                stopWatchdogs();
-                isConnectingToTarget = false;
-                isFastConnectingSaved = false;
-                if (connectedNetworkId != -1) {
-                    try {
-                        wifiManager.disableNetwork(connectedNetworkId);
-                        wifiManager.removeNetwork(connectedNetworkId);
-                        wifiManager.saveConfiguration();
-                    } catch (Exception ignored) {}
-                    connectedNetworkId = -1;
-                }
-                if (targetSsid != null) {
-                    clearKnownCameraIfMatches(targetSsid);
-                }
-                notifyStatus("Authentication failed for " + (targetSsid != null ? targetSsid : "dashcam") + ". Please check camera password.");
+            if (shouldTriggerAuthFallback(authErrorCount, handshakeDropCount, 0)) {
+                String failed = targetSsid;
+                DebugLogger.log("WIFI_AUTH", "WPA authentication rejected for \"" + failed + "\" (authErrorCount=" + authErrorCount + ")");
+                triggerAuthOrConnectionFallback(failed,
+                        "Automatic connection to \"" + cleanSsid(failed) + "\" failed: incorrect Wi-Fi password.",
+                        true);
             }
             return;
         }
@@ -969,6 +1213,7 @@ public class WifiBridge {
                 break;
             case FOUR_WAY_HANDSHAKE:
             case GROUP_HANDSHAKE:
+                handshakeSeenInAttempt = true;
                 notifyStatus("Verifying encryption keys...");
                 if (isConnectingToTarget) {
                     scheduleAssocWatchdog(4000L);
@@ -977,6 +1222,8 @@ public class WifiBridge {
             case COMPLETED:
                 authErrorCount = 0;
                 assocRetryCount = 0;
+                handshakeSeenInAttempt = false;
+                handshakeDropCount = 0;
                 isFastConnectingSaved = false;
                 stopWatchdogs();
                 notifyStatus("Wi-Fi handshake complete. Requesting IP address (DHCP)...");
@@ -992,6 +1239,19 @@ public class WifiBridge {
                 }
                 break;
             case DISCONNECTED:
+                if (isConnectingToTarget && handshakeSeenInAttempt) {
+                    handshakeSeenInAttempt = false;
+                    handshakeDropCount++;
+                    DebugLogger.log("WIFI_AUTH", "WPA 4-way handshake dropped for \"" + targetSsid
+                            + "\" (dropCount=" + handshakeDropCount + ")");
+                    if (shouldTriggerAuthFallback(authErrorCount, handshakeDropCount, 0)) {
+                        String failed = targetSsid;
+                        triggerAuthOrConnectionFallback(failed,
+                                "Automatic connection to \"" + cleanSsid(failed) + "\" failed during password verification.",
+                                true);
+                        return;
+                    }
+                }
                 if (isConnectingToTarget && authErrorCount == 0) {
                     notifyStatus("Wi-Fi negotiating, waiting for link...");
                     long elapsed = SystemClock.elapsedRealtime() - connectAttemptStartMs;
@@ -1380,6 +1640,10 @@ public class WifiBridge {
         // Return to initial state
         try {
             if (initialApEnabled) {
+                // Gen5W Wi-Fi driver requires station mode disabled before bringing SoftAP back up
+                try {
+                    wifiManager.setWifiEnabled(false);
+                } catch (Exception ignored) {}
                 // If initial state was Mode 2 (Connectivity Mode for wireless phone projection)
                 if (initialApMode == 2) {
                     DebugLogger.log("WIFI_RESTORE", "Restoring Mode 2 (Connectivity Mode for wireless projection)...");
@@ -1428,8 +1692,11 @@ public class WifiBridge {
             DebugLogger.log("WIFI_RESTORE", "Error restoring Wi-Fi state: " + e.getMessage());
         }
 
-        // Allow fresh baseline capture if activity later resumes from background
-        initialStateRecorded = false;
+        // Preserve original pre-launch baseline across temporary background suspends so rapid
+        // foreground resumes do not overwrite ApMode=2 while SoftAP is still starting up.
+        if (!"background suspend".equals(reason)) {
+            initialStateRecorded = false;
+        }
 
         if (listener != null) {
             listener.onDisconnected();

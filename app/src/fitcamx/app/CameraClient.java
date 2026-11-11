@@ -2,6 +2,7 @@ package fitcamx.app;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.InputStream;
@@ -52,10 +53,12 @@ public class CameraClient {
     private final ExecutorService executor;
 
     // Session state tracking for streamlined CGI transitions & teardown serialization
+    public static final long KEEPALIVE_MIN_IDLE_MS = 12000L;
     private volatile int knownCameraMode = -1; // -1=unknown, 1=Movie, 2=Playback
     private volatile String cachedDynamicRtspUrl = null;
     private volatile boolean teardownActive = false;
     private volatile HttpURLConnection activeConnection = null;
+    private volatile long lastCgiActivityUptimeMs = 0L;
 
     public interface Callback<T> {
         void onSuccess(T result);
@@ -89,6 +92,53 @@ public class CameraClient {
         teardownActive = false;
         knownCameraMode = -1;
         cachedDynamicRtspUrl = null;
+        lastCgiActivityUptimeMs = 0L;
+    }
+
+    /**
+     * Pure helper: determines whether a Novatek CGI heartbeat (cmd=3016) should be sent
+     * to keep the camera's Wi-Fi client & RTSP session alive during extended Live View.
+     */
+    public static boolean shouldSendKeepalive(boolean isNovatek, boolean teardownActive,
+                                              long lastActivityUptimeMs, long nowUptimeMs, long minIdleMs) {
+        if (!isNovatek || teardownActive) {
+            return false;
+        }
+        return lastActivityUptimeMs <= 0L || (nowUptimeMs - lastActivityUptimeMs) >= minIdleMs;
+    }
+
+    /**
+     * Sends a lightweight Novatek client heartbeat (/?custom=1&cmd=3016) on the CGI queue
+     * when no other CGI activity has occurred recently, preventing the dashcam firmware
+     * from timing out the active RTSP live stream after 1-2 minutes.
+     */
+    public void sendKeepaliveIfIdle() {
+        if (!shouldSendKeepalive(socType == SocType.NOVATEK, teardownActive,
+                lastCgiActivityUptimeMs, SystemClock.uptimeMillis(), KEEPALIVE_MIN_IDLE_MS)) {
+            return;
+        }
+        runAsync(new Runnable() {
+            @Override
+            public void run() {
+                long now = SystemClock.uptimeMillis();
+                if (!shouldSendKeepalive(socType == SocType.NOVATEK, teardownActive,
+                        lastCgiActivityUptimeMs, now, KEEPALIVE_MIN_IDLE_MS)) {
+                    return;
+                }
+                try {
+                    StringBuilder urlBuilder = new StringBuilder("http://");
+                    urlBuilder.append(cameraIp);
+                    if (httpPort > 0 && httpPort != 80) {
+                        urlBuilder.append(":").append(httpPort);
+                    }
+                    urlBuilder.append("/?custom=1&cmd=3016");
+                    httpGetDirectImpl(urlBuilder.toString(), 2000, 2500, CameraClient.this);
+                    lastCgiActivityUptimeMs = SystemClock.uptimeMillis();
+                } catch (Exception e) {
+                    DebugLogger.log("CAM_KEEPALIVE", "Heartbeat cmd=3016 notice: " + e.getMessage());
+                }
+            }
+        });
     }
 
     private void abortActiveConnection() {
@@ -404,6 +454,46 @@ public class CameraClient {
 
     public void prepareAndStartLiveView(final boolean front, final Callback<List<String>> callback) {
         prepareAndStartLiveView(front ? VIEW_FRONT : VIEW_REAR, callback);
+    }
+
+    /**
+     * Non-disruptive liveview encoder nudge used when an RTSP stream stalls mid-session:
+     * re-asserts channel selection (cmd=3028) and liveview push (cmd=2015&par=1) WITHOUT
+     * stopping SD card loop recording unless the firmware explicitly requires it (-13).
+     */
+    public void nudgeLiveEncoder(final int viewMode, final Callback<List<String>> callback) {
+        runAsync(new Runnable() {
+            @Override
+            public void run() {
+                if (teardownActive) return;
+                try {
+                    if (socType == SocType.NOVATEK) {
+                        try {
+                            sendCgiCommand("3028", String.valueOf(viewMode), 2500);
+                        } catch (Exception ignored) {}
+                        try {
+                            String r2015 = sendCgiCommand("2015", "1", 2500);
+                            if (r2015 != null && parseCgiStatus(r2015) == -13 && !teardownActive) {
+                                sendCgiCommand("2001", "0", 2500);
+                                Thread.sleep(80);
+                                sendCgiCommand("2015", "1", 2500);
+                                Thread.sleep(60);
+                                sendCgiCommand("2001", "1", 2500);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    List<String> candidates = getCandidateStreamUrls(viewMode);
+                    String dynamicUrl = cachedDynamicRtspUrl;
+                    if (dynamicUrl != null && !dynamicUrl.isEmpty()) {
+                        candidates.remove(dynamicUrl);
+                        candidates.add(0, dynamicUrl);
+                    }
+                    postSuccess(callback, candidates);
+                } catch (Exception e) {
+                    postError(callback, e);
+                }
+            }
+        });
     }
 
     /**
@@ -942,7 +1032,10 @@ public class CameraClient {
             urlBuilder.append("&").append(paramKey).append("=").append(encoded);
         }
 
-        return httpGetDirectImpl(urlBuilder.toString(), 3500, Math.max(readTimeoutMs, 5000), this);
+        lastCgiActivityUptimeMs = SystemClock.uptimeMillis();
+        String resp = httpGetDirectImpl(urlBuilder.toString(), 3500, Math.max(readTimeoutMs, 5000), this);
+        lastCgiActivityUptimeMs = SystemClock.uptimeMillis();
+        return resp;
     }
 
     private String httpGetDirectTracked(String urlString, int timeoutMs) throws Exception {

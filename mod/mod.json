@@ -1,7 +1,7 @@
 {
   "id": "fitcamx-gen5w",
   "name": "FITCAMX Dashcam",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "hmgapi": ">=1.0.0",
   "authors": ["Antigravity"],
   "license": "AGPL-3.0",
