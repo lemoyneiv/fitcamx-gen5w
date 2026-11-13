@@ -703,6 +703,127 @@ public class CameraClient {
     }
 
     /**
+     * Infers whether a physical rear Fitcamx camera channel is present directly from Novatek
+     * cmd=3014 status XML when unambiguous:
+     * - <Cmd>2002</Cmd><Status>N</Status> with N >= 6 (MOVIE_SIZE_DUAL_*) -> Boolean.TRUE
+     * - Valid status XML (<Cmd>2002</Cmd> present) with <Cmd>3028</Cmd> absent -> Boolean.FALSE
+     * - Otherwise -> null (requires directory or cmd=3028 probe).
+     */
+    public static Boolean inferRearChannelFromStatusXml(String statusXml) {
+        if (statusXml == null || statusXml.isEmpty()) return null;
+        Matcher m2002 = Pattern.compile("(?i)<Cmd>\\s*2002\\s*</Cmd>\\s*<Status>\\s*(-?\\d+)\\s*</Status>").matcher(statusXml);
+        if (!m2002.find()) {
+            return null;
+        }
+        try {
+            int resIdx = Integer.parseInt(m2002.group(1));
+            if (resIdx >= 6) {
+                return Boolean.TRUE;
+            }
+        } catch (NumberFormatException ignored) {}
+
+        Matcher m3028 = Pattern.compile("(?i)<Cmd>\\s*3028\\s*</Cmd>").matcher(statusXml);
+        if (!m3028.find()) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    private String readHttpPrefixTracked(String urlString, int connectTimeoutMs, int readTimeoutMs, int maxChars) throws Exception {
+        URL url = new URL(urlString);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        this.activeConnection = conn;
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Connection", "close");
+        conn.setConnectTimeout(connectTimeoutMs);
+        conn.setReadTimeout(readTimeoutMs);
+        InputStreamReader reader = null;
+        try {
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                throw new Exception("HTTP " + code);
+            }
+            StringBuilder sb = new StringBuilder(Math.min(maxChars, 8192));
+            reader = new InputStreamReader(conn.getInputStream(), "UTF-8");
+            char[] buf = new char[4096];
+            int n;
+            while (sb.length() < maxChars && (n = reader.read(buf, 0, Math.min(buf.length, maxChars - sb.length()))) != -1) {
+                sb.append(buf, 0, n);
+            }
+            return sb.toString();
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (Exception ignored) {}
+            }
+            if (this.activeConnection == conn) {
+                this.activeConnection = null;
+            }
+            conn.disconnect();
+        }
+    }
+
+    /**
+     * Non-disruptively detects whether a rear Fitcamx channel is present when cmd=3014 status XML
+     * alone was inconclusive (e.g. single-cam or 1080P index).
+     * 1) Performs a single bounded prefix read of /CARDV/MOVIE/ (up to 24 KB, 850ms timeout).
+     * 2) If HFS directory listing is disabled on firmware, tests cmd=3028&par=1 followed by
+     *    cmd=3028&par=0 (~50ms total) to check whether Rear PIP channel selection is supported.
+     */
+    public void probeRearChannelNonDisruptive(final Callback<Boolean> callback) {
+        runAsync(new Runnable() {
+            @Override
+            public void run() {
+                if (teardownActive) return;
+                String portPart = (httpPort > 0 && httpPort != 80) ? (":" + httpPort) : "";
+                Boolean detected = null;
+
+                try {
+                    String url = "http://" + cameraIp + portPart + "/CARDV/MOVIE/";
+                    String html = readHttpPrefixTracked(url, 700, 850, 24576);
+                    List<ClipItem> found = XmlListParser.parseFileList(html, "CARDV/MOVIE/");
+                    int frontVideos = 0;
+                    int rearVideos = 0;
+                    for (ClipItem item : found) {
+                        if (item == null || item.isPhoto) continue;
+                        if (item.isFront) {
+                            frontVideos++;
+                        } else {
+                            rearVideos++;
+                        }
+                    }
+                    if (rearVideos > 0) {
+                        detected = Boolean.TRUE;
+                        DebugLogger.log("CAM_PROBE", "Rear Fitcamx channel confirmed via /CARDV/MOVIE/ ("
+                                + rearVideos + " rear, " + frontVideos + " front)");
+                    } else if (frontVideos >= 2) {
+                        detected = Boolean.FALSE;
+                        DebugLogger.log("CAM_PROBE", "Front-only Fitcamx detected via /CARDV/MOVIE/ ("
+                                + frontVideos + " front clips, 0 rear clips)");
+                    }
+                } catch (Exception ignored) {
+                    // Expected on NT966xx firmwares where HFS HTML directory indexing is disabled
+                }
+
+                if (detected == null && !teardownActive && socType == SocType.NOVATEK) {
+                    try {
+                        String rRear = sendCgiCommand("3028", "1", 1500);
+                        try {
+                            sendCgiCommand("3028", "0", 1500);
+                        } catch (Exception ignored) {}
+                        if (rRear != null && !rRear.isEmpty()) {
+                            detected = Boolean.valueOf(isCgiStatusOk(rRear));
+                            DebugLogger.log("CAM_PROBE", "Fitcamx rear channel probe via cmd=3028&par=1 -> "
+                                    + detected + " (status=" + parseCgiStatus(rRear) + ")");
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                postSuccess(callback, detected);
+            }
+        });
+    }
+
+    /**
      * Start (true) or Stop (false) Recording
      */
     public void setRecording(final boolean start, final Callback<Boolean> callback) {
@@ -1000,6 +1121,80 @@ public class CameraClient {
 
                     postSuccess(callback, true);
                 } catch (Exception e) {
+                    postError(callback, e);
+                }
+            }
+        });
+    }
+
+    /**
+     * Formats the Fitcamx microSD card (Novatek cmd=3010&par=1) after safely stopping loop
+     * recording and liveview, then switches back to Movie mode and resumes loop recording.
+     */
+    public void formatSdCard(final Callback<Boolean> callback) {
+        runAsync(new Runnable() {
+            @Override
+            public void run() {
+                if (teardownActive) return;
+                try {
+                    DebugLogger.log("CAM_FORMAT", "Starting Fitcamx SD card format sequence...");
+                    if (socType == SocType.HISILICON) {
+                        String url = "http://" + cameraIp + (httpPort != 80 ? ":" + httpPort : "")
+                                + "/cgi-bin/hi3510/param.cgi?cmd=formatsd";
+                        httpGetDirectTracked(url, 25000);
+                        postSuccess(callback, true);
+                        return;
+                    }
+                    if (socType == SocType.JIELI) {
+                        throw new Exception("SD card format over Wi-Fi is not supported on JieLi firmware");
+                    }
+
+                    // 1. Stop loop recording and liveview encoder cleanly before touching FAT filesystem
+                    try { sendCgiCommand("2001", "0"); } catch (Exception ignored) {}
+                    Thread.sleep(150);
+                    try { sendCgiCommand("2015", "0"); } catch (Exception ignored) {}
+                    Thread.sleep(120);
+
+                    // 2. Issue Novatek Format Disk1 command (cmd=3010&par=1) with 30s timeout for 64-256GB cards
+                    String resp = sendCgiCommand("3010", "1", 30000);
+                    DebugLogger.log("CAM_FORMAT", "cmd=3010&par=1 response: " + (resp != null ? resp.trim() : "null"));
+
+                    // Some NT96675 firmwares reject format (-13) unless placed in non-movie Playback/System mode first
+                    if (!isCgiStatusOk(resp)) {
+                        DebugLogger.log("CAM_FORMAT", "Retrying cmd=3010&par=1 from Playback/System mode (cmd=3001&par=2)...");
+                        try {
+                            String rMode2 = sendCgiCommand("3001", "2");
+                            if (isCgiStatusOk(rMode2)) knownCameraMode = 2;
+                        } catch (Exception ignored) {}
+                        Thread.sleep(150);
+                        resp = sendCgiCommand("3010", "1", 30000);
+                        DebugLogger.log("CAM_FORMAT", "Retry cmd=3010&par=1 response: " + (resp != null ? resp.trim() : "null"));
+                    }
+
+                    boolean formatOk = isCgiStatusOk(resp);
+                    int statusCode = parseCgiStatus(resp);
+
+                    // 3. Always restore Video mode and resume continuous SD card recording
+                    Thread.sleep(200);
+                    try {
+                        String rVideo = sendCgiCommand("3001", "1");
+                        if (isCgiStatusOk(rVideo)) knownCameraMode = 1;
+                    } catch (Exception ignored) {}
+                    Thread.sleep(100);
+                    try { sendCgiCommand("2015", "1"); } catch (Exception ignored) {}
+                    Thread.sleep(80);
+                    try {
+                        String rRec = sendCgiCommand("2001", "1");
+                        if (isCgiStatusOk(rRec)) knownCameraMode = 1;
+                    } catch (Exception ignored) {}
+
+                    if (!formatOk) {
+                        throw new Exception("Camera rejected SD card format (status=" + statusCode + ")");
+                    }
+                    DebugLogger.log("CAM_FORMAT", "Fitcamx SD card formatted and loop recording resumed.");
+                    postSuccess(callback, true);
+                } catch (Exception e) {
+                    DebugLogger.log("CAM_FORMAT", "SD card format failed", e);
                     postError(callback, e);
                 }
             }

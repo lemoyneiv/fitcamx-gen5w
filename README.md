@@ -4,266 +4,156 @@
 ![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)
 ![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v0.7.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v1.0.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
-A native, high-performance dashcam viewer and controller application specifically engineered for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" widescreen displays running Android 4.4.2 KitKat API 19).
+A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" displays). Stream live video from **FITCAMX** integrated Wi-Fi dashcams, view your vehicle's OEM analog backup camera, review SD card & USB dashcam clips, and export footage directly to a USB flash drive — with zero external codec packs or system modifications required.
 
-Designed specifically for **FITCAMX** integrated dashcams (Novatek NT96670 / NT96672 / NT96675 series chipsets).
+**[Screenshots](#screenshots)** · **[Installation](#installation)** · **[Usage Guide](#usage-guide)** · **[`gen5-RearDashcam` Coexistence](#car-backup-camera--coexistence-with-gen5-reardashcam)** · **[Supported Vehicles](#supported-vehicles--hardware)**
 
 ---
 
 ## Screenshots
 
-The application is specifically engineered for Gen5W 24:9 ultra-widescreen infotainment displays (1920×720 and 2560×720), featuring a themable **Material Design 3** interface (shown below in **Ioniq Teal**), ergonomic driver-side stadium pill controls, full-height centered 16:9 video surfaces, and auto-hiding smoked-glass overlays.
-
-### Live View (Front, Dual PiP, Rear & Rear Mirror Streams)
-*RTSP live monitoring with non-disruptive channel switching, per-view horizontal mirroring (`Mirror: ON`), real-time status badges, instant snapshot, emergency clip lock, and camera settings.*
+### Live View — FITCAMX & Car Backup Camera
+*Front live stream (`FRONT`) with driver-side navigation rail and camera control panel:*
 
 ![Live View - Front Camera](docs/screenshots/01_live_front.png)
 
-*Dual-camera Picture-in-Picture (PiP) live stream*
+*Dual-camera Picture-in-Picture (`DUAL (PIP)`):*
 
 ![Dual Camera View](docs/screenshots/02_live_dual.png)
 
-*Rear camera 1080p live stream*
+*Rear camera (`REAR`) with `Mirror: OFF` vs. rearview-mirror horizontal flip (`Mirror: ON`):*
 
 ![Rear Camera View](docs/screenshots/03_live_rear.png)
 
-*Rear camera with rearview-mirror horizontal flip (`Mirror: ON`)*
-
 ![Rear Camera Mirrored View](docs/screenshots/04_live_rear_mirror.png)
 
-### SD Card Footage & Still Photo Gallery
-*Indexed SD card media browser with `All`, `Front`, `Rear`, `Emergency`, and `Photos` filter chips, compact M3 clip cards, 4K HEVC playback, and direct USB export.*
+*Side-by-Side (`SIDE-BY-SIDE` — FITCAMX Front + Car Backup Camera) and fullscreen OEM Car Backup Camera (`BACKUP`):*
 
-![SD Card Footage Playback](docs/screenshots/05_4k_playback.png)
+![Side-by-Side View](docs/screenshots/05_live_side_by_side.png)
 
-*File picker hidden for full-height 1120×630 playback with auto-hiding smoked-glass toolbar & scrub bar overlays*
+![Car Backup Camera View](docs/screenshots/06_live_car_backup.png)
 
-![Hidden File Picker and Scrub Bar Overlay](docs/screenshots/06_hidden_picker.png)
+### SD Card & USB Footage Playback
+*Indexed clip browser (`All`, `Front`, `Rear`, `Emergency`, `Photos`) with one-tap `USB` export, collapsible full-height playback (`Show List` / scrub bar), and light theme view:*
+
+![SD Card 4K Playback](docs/screenshots/07_sdcard_playback.png)
+
+![Full-Height Playback with Scrub Bar](docs/screenshots/08_sdcard_full_height.png)
+
+![Emergency Clips in Daylight Theme](docs/screenshots/09_sdcard_emergency_daylight.png)
+
+### Automotive Color Themes & Advanced Options
+*Six built-in Material Design 3 palettes (**Ocean Blue**, **Ioniq Teal**, **M3 Violet**, **Kia Crimson**, **Genesis Copper**, and **Daylight**) — tap or long-press the sidebar theme pill to switch live:*
+
+![Six Automotive Color Themes](docs/screenshots/10_themes_sidebar.png)
+
+*Long-press the top-left **FITCAMX** header to open **Advanced Options**:*
+
+![Advanced Options Menu](docs/screenshots/11_advanced_options.jpg)
 
 ---
 
 ## Installation
 
 ### Prerequisites
-- Head unit jailbroken/rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (v1.0.0+) or **NEMESIS Manager**.
+- A Gen5W head unit rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (`v1.0.0+`, recommended) or **NEMESIS Manager**.
 
 ### Method 1: HMG-API USB Installation (Recommended)
-1. Download the latest release package: [**`fitcamx-gen5w-v0.7.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-hmgapi-usb.zip) from the [GitHub Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v0.7.0).
-2. Extract the archive onto the root of a FAT32-formatted USB flash drive.
-   - The flash drive will contain `HMGAPI/updates/fitcamx-gen5w-v0.7.0.zip`.
-3. Insert the flash drive into the vehicle's multimedia USB port.
-4. Open the **HMG-API** app on the infotainment screen.
-5. Go to **Updates**, select **FITCAMX Dashcam**, tap **Install**, then tap **Apply changes**.
-6. Tap **Restart unit** (or reboot). The FITCAMX icon will appear in your application launcher.
+1. Download [**`fitcamx-gen5w-v1.0.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.0.0/fitcamx-gen5w-v1.0.0-hmgapi-usb.zip) from the [Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v1.0.0).
+2. Extract the archive to the root of a FAT32-formatted USB flash drive (producing `HMGAPI/updates/fitcamx-gen5w-v1.0.0.zip`).
+3. Insert the USB drive into the vehicle's multimedia USB port and open **HMG-API** on the head unit.
+4. Go to **Updates** → select **FITCAMX Dashcam** → tap **Install** → tap **Apply changes**, then **Restart unit**.
 
-### Method 2: NEMESIS Package Store
-1. Download [**`fitcamx-gen5w-v0.7.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-nemesis-usb.zip) (or store package [**`fitcamx-gen5w-v0.7.0-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v0.7.0/fitcamx-gen5w-v0.7.0-nemesis-package.zip)) and copy to your USB drive.
-2. Launch NEMESIS Manager on the head unit and install the package.
+### Method 2: NEMESIS Manager
+1. Download [**`fitcamx-gen5w-v1.0.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.0.0/fitcamx-gen5w-v1.0.0-nemesis-usb.zip) (or [**`fitcamx-gen5w-v1.0.0-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.0.0/fitcamx-gen5w-v1.0.0-nemesis-package.zip)) and copy it to your USB drive.
+2. Open **NEMESIS Manager** on the head unit and install the package.
 
 ---
 
-## Highlights & Features
+## Usage Guide
 
-- **Embedded LibVLC 3.3.4 Media Engine:**
-  - Self-contained software & hardware decoding pipeline (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`).
-  - **Zero external codec dependencies** — operates standalone without requiring codec packs or system modifications.
-  - Smooth RTSP streaming with sub-second latency for Front, Rear, and Dual camera feeds (`rtsp://192.168.1.254/xxx.mov`), kept continuously active via Novatek `cmd=3016` heartbeats, `1.2s` RTP/frame stall detection (`IMedia.Stats`), and silent zero-CGI self-healing RTSP reconnects (`~160 ms`).
-  - Uninterrupted recording: Live stream monitoring does not pause or interrupt ongoing dashcam recording.
+### 1. Connecting & Wi-Fi Handover
+- **Automatic Connection:** Launching FITCAMX automatically switches the head unit from SoftAP mode to Wi-Fi client mode, connects to your FITCAMX camera, syncs the camera's clock to the car, and starts live video without interrupting dashcam recording.
+- **Custom Password or SSID:** If you changed your FITCAMX Wi-Fi password or SSID, tap **Wi-Fi Setup** when prompted (or long-press **Rescan** at any time) to choose your network and save credentials.
+- **Clean Exit:** Tapping **Exit** (or backgrounding the app) automatically restores the head unit's prior Wi-Fi/SoftAP configuration so wireless phone projection reconnects seamlessly.
 
-- **Dual-Profile SD Card Playback Engine:**
-  - **Front 4K / 1440p HEVC Clips:** Because the vehicle's Telechips TCC803x processor lacks hardware HEVC decoding silicon, Front clips are played via a specialized keyframe review engine. The player decodes full-resolution intra/keyframes in high quality while dilating presentation timing (`0.33x` slideshow pacing) and decoupling stream clocks (`:no-ts-trust-pcr`). This allows crystal-clear incident review without overloading the 1.0 GHz Cortex-A7 CPU cores or dropping frames.
-  - **Rear 1080p H.264 Clips:** Plays at full 30 fps 1.0x speed with complete hardware/SIMD acceleration.
-  - Audio is automatically muted during gallery playback to prevent interfering with vehicle radio/audio focus.
+### 2. Live View & Camera Controls
+- **View Switching:** Tap **View** on the right-hand camera rail to cycle live feeds:
+  - **Dual-camera FITCAMX:** `FRONT` → `DUAL (PIP)` → `REAR` (plus `SIDE-BY-SIDE` and `BACKUP` if enabled in Advanced Options).
+  - **Front-only FITCAMX:** `FRONT` → `SIDE-BY-SIDE` → `BACKUP` (automatically enabled on supported analog backup camera trims).
+- **Live Mirroring:** Tap **Mirror** to flip the live feed horizontally (`Mirror: ON`) per view — useful for rearview-mirror orientation on rear cameras without flipping saved SD card recordings.
+- **Dashcam Controls:** Capture still **Snapshots**, **Lock Clip** to the Emergency folder, start/stop recording, toggle **Rec: 4K UHD / 2K QHD**, mute/unmute the **Microphone**, or **Sync Clock** directly from the right-hand camera rail.
 
-- **Material Design 3 (`m3.material.io`) Themable Interface:**
-  - Includes **6 curated automotive color themes** tailored for Gen5W cabins: **Ocean Blue** (default), **Ioniq Teal**, **M3 Violet**, **Kia Crimson**, **Genesis Copper**, and **Daylight (Light)**.
-  - Built natively for Android 4.4.2 KitKat (API 19) with zero external UI library overhead: tonal surface hierarchy, stadium pill controls, `8dp` filter chips, `12dp` clip cards, state-layer press feedback, and verified WCAG AA (`>= 4.5:1`) contrast across every role.
-  - **Live Hot-Swapping:** Tap the sidebar theme pill to pick a palette, or long-press to cycle themes immediately without restarting the app or interrupting active video playback.
+### 3. SD Card & USB Footage Playback
+- Switch to **SD Card** in the left sidebar to browse indexed footage across **All**, **Front**, **Rear**, **Emergency**, and **Photos**.
+- **Smooth Playback on Gen5W Hardware:** Rear 1080p H.264 clips play at full 30 fps; high-bitrate 4K/2K HEVC front clips use an optimized high-resolution keyframe review mode engineered for the head unit's ARM Cortex-A7 processor. Audio is muted automatically so vehicle radio/media playback is undisturbed.
+- **Full-Height Viewing & Export:** Collapse the clip list to expand video to the full `1120×630` viewport with floating scrub controls (`Show List` restores the browser). Tap **USB** on any clip card (or **Save to USB** on the playback bar) to export directly to `/storage/usb0/DashcamFootage/` with live transfer speed and progress.
 
-- **Optimized 24:9 / 8:3 Widescreen Interface & Full-Height Playback:**
-  - Ergonomic vertical navigation rail along the left display edge for direct driver reach.
-  - **100% Full-Height Video Viewports:** Both Live View and SD Card Footage span the full `630px` vertical app window (`1026×578` with the clip list open; **`1120×630`** when **Hide List** is tapped), using auto-hiding smoked-glass floating toolbars and scrub bars that never compress or reflow the video surface.
-  - Automatic aspect ratio protection (`android.max_aspect="4.0"`) and dynamic surface layout scaling ensure video feeds are always centered with true 16:9 geometry and zero letterbox distortion.
+### 4. Themes, Screenshots, Diagnostics & Advanced Options
+- **Color Themes:** Tap the theme pill in the left sidebar (e.g., **Ocean Blue** / **Ioniq Teal**) to pick from 6 automotive palettes, or **long-press** it to cycle palettes live.
+- **USB Screenshot:** **Tap** the top-left **FITCAMX** header to save a PNG screenshot to your attached USB drive (`DashcamFootage/`).
+- **Advanced Options:** **Long-press** the top-left **FITCAMX** header to open **Advanced Options**:
+  - **Enable Car Backup Camera views even when Rear Fitcamx is present:** Adds `Side-by-Side` and `Car Backup` to the Live View rotation on dual-camera FITCAMX setups without replacing any FITCAMX views.
+  - **Format Fitcamx SD Card...:** Double-confirmation utility to format the dashcam's microSD card in-car.
+- **Save Log & Diagnostics:** Nothing is ever written automatically to internal head-unit flash storage; tap **Save Log** with a USB drive inserted to export `fitcamx_debug_log.txt`, or tap **Diagnostics** to inspect live connection state.
 
-- **Complete Dashcam Remote Control:**
-  - **Camera Switching:** Instantly switch between Front, Rear, and Dual live feeds.
-  - **Per-View Live Mirroring:** Toggle horizontal live mirroring (`Mirror: ON / OFF`) independently for Front, Rear, and Dual views — ideal for rearview-mirror orientation on the Rear camera while keeping recorded SD card files unflipped so license plates and timestamps remain readable.
-  - **Resolution Setting:** Toggle between 4K UHD (`par=0`) and 2K QHD (`par=1`) recording modes with active badge confirmation.
-  - **Microphone Control:** Toggle in-cabin audio recording with real-time status query verification (`cmd=2007`).
-  - **Instant Snapshot:** Capture still photos while video recording is active (`cmd=2017` / `cmd=1001`).
-  - **Emergency Lock:** Write-protect current video segments (`cmd=2001&par=2` / `cmd=2011&par=3`).
-  - **Automatic Clock Sync:** Synchronizes dashcam internal RTC date and time with the car's system clock (`cmd=3005` + `cmd=3006`) upon connection.
+---
 
-- **SD Card Footage & Still Photo Review + Direct USB Export:**
-  - Fast directory indexing with session caching: loads and filters clips and snapshots from `CARDV/Movie`, `CARDV/EMR`, and `CARDV/PHOTO`.
-  - Filter by `All`, `Front`, `Rear`, `Emergency` (locked clips), and `Photos` (still snapshots) with in-app still photo previewing.
-  - Direct SD-to-USB transfer: export selected video clips and still photos directly from the camera to an attached car USB drive (`/storage/usb0/DashcamFootage/`) with live progress, write speed indicators, and transfer cancellation.
+## Car Backup Camera & Coexistence with `gen5-RearDashcam`
 
-- **Tap-to-Screenshot to USB:**
-  - Tap the top-left **FITCAMX** logo at any time to save a full PNG screenshot strictly to the attached USB flash drive (`DashcamFootage/fitcamx_screenshot_YYYYMMDD_HHMMSS.png`) with zero internal `/data` flash writes.
+FITCAMX (`v1.0.0+`) integrates native live viewing for the Gen5W OEM analog backup camera and is specifically engineered to run alongside **[`KramerTech/gen5-RearDashcam`](https://github.com/KramerTech/gen5-RearDashcam)** with zero hardware conflicts.
 
-- **Intelligent Wi-Fi Handover & Clean State Restoration:**
-  - Automatically transitions between the head unit's SoftAP and client (STA) mode to connect to the dashcam's Wi-Fi network.
-  - **Custom Password & Manual SSID Fallback:** Automatically detects non-default camera passwords or custom SSIDs and prompts to select a network (or enter a hidden SSID) and save custom WPA/WPA2 credentials across launches (`Wi-Fi Setup` / long-press `Rescan` anytime).
-  - Accurately restores prior Wi-Fi mode and SoftAP configuration upon exit so wireless phone projection reconnects cleanly.
-  - Integrated **"Exit & Reboot"** option invokes the HMG-API root mod service (`svc/reboot.sh`) for a clean head unit restart when desired.
+### OEM Backup Camera Compatibility
+- **Standard Analog Backup Camera Trims (`type 0`):** Supported out of the box for both **Side-by-Side** (FITCAMX Front + Car Backup) and fullscreen **Car Backup** live views.
+- **360° Surround View Monitor (`SVM`) Trims (`type 6`):** Vehicles with the 360° camera package route video through an external SVM controller rather than the head unit's analog capture memory. FITCAMX detects this automatically at startup and hides the Car Backup views cleanly.
 
-- **Safe & Non-Intrusive Logging:**
-  - Automated continuous background disk dumps are disabled to protect flash memory wear.
-  - Diagnostics are only written when a USB drive is attached and the user explicitly taps **"Export Log"**.
+### How Coexistence with `gen5-RearDashcam` Works
+If you have `gen5-RearDashcam` installed to record your car's backup camera to USB, both apps work together seamlessly:
+1. **Passive Shared Memory Viewing (`Shared` Mode):** When `gen5-RearDashcam` is actively recording to a USB drive, FITCAMX never opens or steals the camera hardware. Instead, it reads live video frames passively from shared `/dev/admem` memory while `gen5-RearDashcam` continues recording uninterrupted `.ts` segments to USB.
+2. **Automatic Camera Yielding (`Direct` → `Shared`):** When no USB drive is inserted (so `gen5-RearDashcam` is idle), FITCAMX opens the backup camera directly for live viewing. If you insert a USB drive mid-session or shift out of Reverse while `gen5-RearDashcam` is active, FITCAMX yields hardware ownership so `gen5-RearDashcam` reclaims recording first, then seamlessly switches to passive `Shared` viewing.
+3. **Instant OEM Reverse & Parking Button Priority:** Shifting into **Reverse** or pressing the physical dashboard camera button releases camera ownership in under `800 ms` and restores factory parking guidelines so the OEM backup display always takes immediate priority.
+4. **Unified USB Gallery:** Recordings and snapshots saved by `gen5-RearDashcam` (`Dashcam/*.ts`, `Saved/*.ts`, and `Snapshots/` on your USB drive) are automatically indexed into FITCAMX's **SD Card** browser (`All`, `Rear`, `Emergency`, and `Photos`) for convenient in-car playback alongside your FITCAMX SD card clips.
 
 ---
 
 ## Supported Vehicles & Hardware
 
-### Head Unit Platforms & Compatibility
+- **Verified Vehicles:** Actively tested and verified on **2023 Hyundai Ioniq 5 AWD** (standard analog backup camera) and **Kia EV6** (360° SVM trim).
+- **Compatible Gen5W Platform:** Designed for Hyundai, Kia, and Genesis vehicles equipped with **Gen5W** 10.25" or 12.3" widescreen navigation head units running Android 4.4.2 KitKat (API 19, ARMv7), including Gen5W models of Ioniq 5, Ioniq 6, Kona, Tucson, Santa Fe, Sonata, Palisade, EV6, EV9, Niro, Sportage, K5, Carnival, Telluride, GV60, G80, GV70, and GV80.
+- **Supported Dashcams:** FITCAMX OEM-style integrated Wi-Fi dashcams (Novatek NT96670 / NT96672 / NT96675 series, default IP `192.168.1.254`).
 
-> [!IMPORTANT]
-> **Tested & Verified Vehicle:** This software has been actively developed, benchmarked, and verified on a **2023 Hyundai Ioniq 5 AWD**.
->
-> **Potentially Supported Vehicles (Untested):** Any Hyundai, Kia, or Genesis vehicle equipped with a **Gen5W** widescreen navigation system (10.25" or 12.3" display running Android 4.4.2 KitKat API 19). Because they share the identical underlying Telechips/Mobis hardware architecture and firmware stack, the following vehicles are theoretically compatible, but **have not yet been individually tested or verified**:
-> - **Hyundai:** Ioniq 5 (Tested & Verified), Ioniq 6, Kona Electric (Gen5W), Tucson, Santa Fe, Sonata, Palisade
-> - **Kia:** EV6, EV9, Niro EV, Sportage, K5, Carnival, Telluride
-> - **Genesis:** GV60, G80, GV70, GV80 (Gen5W models)
-> - **OS Platform:** Android 4.4.2 KitKat (API 19), Dalvik runtime, ARMv7 (`armeabi-v7a`)
+---
 
-### Dashcam Hardware
-- **FITCAMX OEM-Look Dashcams** (Novatek NT96672 / NT96675 / NT96670 architectures).
-- Default IP: `192.168.1.254`
-- Default RTSP Port: `554`
-- Default HTTP Control Port: `80` (or `3333` on select firmware revisions)
+## Building from Source
+
+Requires **Linux, macOS, or Windows**, **JDK 8 or 17+**, **Python 3.8+**, and **OpenSSL**. Android SDK (`android-19` + Build-Tools `30.0.3`) and `HMG-API` are downloaded and cached automatically on first build:
+
+```bash
+git clone https://github.com/lemoyneiv/fitcamx-gen5w.git
+cd fitcamx-gen5w
+./build.sh
+python3 tests/run_tests.py
+```
+
+Signed HMG-API and NEMESIS install packages are output to `dist/`. For architecture details, Novatek CGI documentation, and platform constraints, see [`AGENT_GUIDE.md`](AGENT_GUIDE.md).
 
 ---
 
 > [!CAUTION]
-> ### Important Legal Disclaimer & Assumption of Risk
-> **USE AT YOUR OWN RISK:** This application is provided "AS IS", without warranty of any kind, express or implied. Installing third-party software, modifying system settings, or jailbreaking automotive infotainment hardware carries inherent risks including system instability, potential loss of functionality, or voiding vehicle warranties. The authors and contributors assume no liability for any damage, warranty loss, vehicle malfunction, or legal consequences resulting from the use or installation of this software.
+> ### Legal Disclaimer & Driver Safety Notice
+> **USE AT YOUR OWN RISK:** This software is provided "AS IS", without warranty of any kind. Installing third-party software on automotive infotainment systems carries inherent risks including system instability or warranty impact.
 >
-> **NON-AFFILIATION NOTICE:**
-> * This project is an independent community open-source project and is **NOT affiliated with, authorized by, sponsored by, or endorsed by Hyundai Motor Group** (Hyundai Motor Company, Kia Corporation, Genesis Motor LLC) or any of their subsidiaries. All vehicle names, trademarks, and emblems belong to their respective owners.
-> * This project is **NOT affiliated with, authorized by, sponsored by, or endorsed by FITCAMX** or its manufacturer. The mark "FITCAMX" is used strictly for descriptive and nominative fair-use identification of hardware compatibility.
+> **NON-AFFILIATION:** Independent community open-source project — **not** affiliated with, sponsored by, or endorsed by **Hyundai Motor Group** (Hyundai, Kia, Genesis) or **FITCAMX**.
 >
-> **DRIVER SAFETY NOTICE:**
-> Operating or viewing interactive video applications while driving is hazardous and strictly prohibited by traffic safety laws in most jurisdictions. This software is designed and intended solely for use when the vehicle is **safely parked**. Never operate or view video playback while operating the vehicle. Always keep your full attention on driving and the road.
->
-> *For the complete legal notice, please read [`DISCLAIMER.md`](DISCLAIMER.md).*
+> **DRIVER SAFETY:** Intended strictly for use when the vehicle is **safely parked**. Never interact with video playback or controls while driving. See [`DISCLAIMER.md`](DISCLAIMER.md) for the complete legal notice.
 
 ---
 
-## Building from Source & Cloud Workflow
+## License & Credits
 
-### Prerequisites
-- **Operating System:** Linux (including Antigravity Cloud VMs & GitHub Actions), macOS, or Windows 10/11
-- **JDK:** Java Development Kit 8 or 17+ (`javac`, `keytool`)
-- **Python:** Python 3.8+ and **OpenSSL**
-- **Auto-Provisioned Dependencies:** Android SDK (`android-19` + Build-Tools `30.0.3`) and [HMG-API](https://github.com/VysseCodes/HMG-API) are automatically downloaded and cached on first run if not already installed.
-
-### Build & Verification Steps
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/lemoyneiv/fitcamx-gen5w.git
-   cd fitcamx-gen5w
-   ```
-
-2. Run the self-bootstrapping build and verification suite:
-   ```bash
-   ./build.sh
-   python3 tests/run_tests.py
-   ```
-
-The pipeline automatically:
-1. Provisions/caches `android-19/android.jar`, Build-Tools `30.0.3`, and `HMG-API` (persisted across cloud sessions).
-2. Generates `R.java` with `aapt` and compiles Java sources targeting Java 8 (`javac --release 8`).
-3. Shrinks and converts bytecode to Dalvik API 19 format using `R8 --min-api 19` (`tools/proguard-rules.pro`).
-4. Bundles deflated (`ZIP_DEFLATED`) `libvlc.so`, `libvlcjni.so`, and `libc++_shared.so` into the APK.
-5. Zipaligns and signs `Fitcamx.apk` with v1 JAR signatures (using production keys when configured, or ephemeral dev keys for local/PR testing).
-6. Packages and signs HMG-API and NEMESIS USB archives in `dist/`.
-
-### Cloud Signing Keys, Google Drive Sync & CI/CD
-- **Manage Production Signing Keys** (preserves seamless head-unit upgrades across releases):
-  ```bash
-  python3 tools/manage_keys.py status
-  python3 tools/manage_keys.py import --sync-github-secrets
-  ```
-- **Export Built Packages to Google Drive** (`FITCAMX Gen5W Builds`):
-  ```bash
-  ./build.sh --sync-gdrive
-  ```
-- **GitHub Actions CI & Releases:**
-  - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the full build and 119-check test suite on every push and pull request, uploading downloadable ZIP artifacts.
-  - [`.github/workflows/release.yml`](.github/workflows/release.yml) verifies production signing keys (`--require-release-keys`) on `v*.*.*` tags and publishes all 4 signed ZIP packages + `SHA256SUMS.txt` to GitHub Releases.
-
----
-
-## Project Structure
-
-```
-fitcamx/
-├── .github/workflows/
-│   ├── ci.yml                      # Automated build, unit test & binary invariant CI workflow
-│   └── release.yml                 # Production-signed GitHub Release publisher on v* tags
-├── app/
-│   ├── AndroidManifest.xml         # Package definition, permissions, min/targetSdk 19
-│   ├── libs/
-│   │   └── libvlc.jar              # LibVLC 3.3.4 Android Java interface
-│   ├── res/                        # Layouts, drawables, strings, colors
-│   └── src/
-│       ├── fitcamx/app/
-│       │   ├── MainActivity.java        # Core UI controller & lifecycle coordinator
-│       │   ├── ThemeManager.java        # Material Design 3 tonal palette & API 19 shape engine
-│       │   ├── CameraClient.java        # Novatek CGI protocol client & state sync
-│       │   ├── VlcPlayerManager.java    # LibVLC lifecycle, surface views, RTSP & hflip mirror engines
-│       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover & custom PSK state machine
-│       │   ├── UsbDownloader.java       # Direct SD-to-USB chunked download worker
-│       │   ├── HmgapidClient.java       # Root daemon IPC client (LFD1 protocol)
-│       │   ├── ScreenshotHelper.java    # USB-only screenshot capture & color normalizer
-│       │   ├── DebugLogger.java         # Diagnostics collector & on-demand USB exporter
-│       │   ├── TsHeaderSniffer.java     # MPEG-TS / MP4 codec header sniffer (HEVC vs AVC)
-│       │   ├── XmlListParser.java       # Sanitized Novatek XML/HTML media index parser
-│       │   └── ClipItem.java            # SD card clip & still photo metadata model
-│       └── main/jniLibs/armeabi-v7a/
-│           ├── libvlc.so                # Precompiled LibVLC native ARMv7 binary
-│           ├── libvlcjni.so             # LibVLC JNI binding
-│           └── libc++_shared.so         # LLVM C++ runtime
-├── mod/
-│   ├── mod.json                    # HMG-API manifest & launcher descriptor
-│   ├── svc/
-│   │   ├── reboot.sh               # Root service script for head unit reboot
-│   │   └── screenshot.sh           # Root service script for USB-only framebuffer capture
-│   └── icons/                      # Head unit launcher icons
-├── tools/
-│   ├── build_package.py            # Automated build, R8 dexing, alignment & signing pipeline
-│   ├── cloud_env.py                # Cloud SDK/HMG-API provisioning, cache & signing key resolver
-│   ├── manage_keys.py              # Persistent cloud key & GitHub Secrets management CLI
-│   ├── sync_gdrive.py              # Google Drive build package exporter
-│   ├── proguard-rules.pro          # R8 shrinking & API 19 Dalvik compatibility rules
-│   ├── setup_android_sdk.py        # Cross-platform cached Android SDK setup helper
-│   └── sign.py                     # Standalone HMG-API & NEMESIS signing utility
-├── tests/
-│   ├── run_tests.py                # Automated build, JVM unit test & binary invariant runner
-│   └── FitcamUnitTests.java        # Unit & mock-HTTP integration test suite
-├── dist/                           # Generated release packages (gitignored; published via Releases/Drive)
-├── AGENT_GUIDE.md                  # Comprehensive technical handbook for AI assistants & developers
-├── DISCLAIMER.md                   # Detailed legal disclaimers, trademark & driver safety notices
-├── LICENSE                         # AGPL-3.0 and third-party notices
-└── README.md
-```
-
----
-
-## Technical Documentation for Developers & AI Agents
-
-For an in-depth breakdown of system constraints, Novatek CGI query commands, LibVLC KitKat considerations, and HMG-API root IPC protocol, please refer to [`AGENT_GUIDE.md`](AGENT_GUIDE.md).
-
----
-
-## License, Disclaimers & Credits
-
-- **Disclaimers & Trademark Notices:** Use of this application is at the user's sole risk. See [`DISCLAIMER.md`](DISCLAIMER.md) for full liability, non-affiliation, and safety notices.
-- **Application Code & Mod Packaging:** Licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
-- **LibVLC for Android:** Licensed under the [GNU Lesser General Public License v2.1 or later (LGPL-2.1+)](https://www.videolan.org/legal.html). Copyright © VideoLAN and VLC authors.
-- **HMG-API:** Platform integration specifications developed by [VysseCodes](https://github.com/VysseCodes/HMG-API) under AGPL-3.0.
-- **AOSP Platform Framework:** Licensed under the Apache License, Version 2.0. Copyright © The Android Open Source Project.
+- **License:** Licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
+- **LibVLC for Android:** Licensed under [LGPL-2.1+](https://www.videolan.org/legal.html) — Copyright © VideoLAN and VLC authors.
+- **HMG-API:** Gen5W modding framework and root IPC specifications by [VysseCodes](https://github.com/VysseCodes/HMG-API) (AGPL-3.0).
+- **Gen5W Analog Backup Camera Research:** OEM `/dev/admem` shared-memory ring layout and coexistence integration informed by [`KramerTech/gen5-RearDashcam`](https://github.com/KramerTech/gen5-RearDashcam) (MIT).

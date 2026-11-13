@@ -92,10 +92,12 @@ def main() -> None:
     os.makedirs(os.path.join(BUILD_DIR, "gen"), exist_ok=True)
     os.makedirs(os.path.join(BUILD_DIR, "classes"), exist_ok=True)
     os.makedirs(os.path.join(BUILD_DIR, "dex"), exist_ok=True)
+    os.makedirs(os.path.join(BUILD_DIR, "daemon_classes"), exist_ok=True)
+    os.makedirs(os.path.join(BUILD_DIR, "daemon_dex"), exist_ok=True)
     os.makedirs(DIST_DIR, exist_ok=True)
 
     # 1. Generate R.java with aapt
-    print("\n[1/6] Generating R.java via aapt...")
+    print("\n[1/7] Generating R.java via aapt...")
     cmd_gen_r = [
         AAPT, "package", "-m",
         "-J", os.path.join(BUILD_DIR, "gen"),
@@ -108,7 +110,7 @@ def main() -> None:
     print("  Generated R.java:", r_java_files)
 
     # 2. Compile Java Sources
-    print("\n[2/6] Compiling Java sources with javac (target: Java 8)...")
+    print("\n[2/7] Compiling Java sources with javac (target: Java 8)...")
     java_srcs = glob.glob(os.path.join(BASE_DIR, "app", "src", "**", "*.java"), recursive=True) + r_java_files
     lib_jars = glob.glob(os.path.join(BASE_DIR, "app", "libs", "*.jar"))
     classpath = ANDROID_JAR
@@ -124,8 +126,35 @@ def main() -> None:
     subprocess.run(cmd_javac, check=True)
     print("  Compiled", len(java_srcs), "Java source files.")
 
+    # 2b. Compile & DEX uid=1000 RearCamDaemon helper service (svc/rearcam.jar)
+    print("\n[3/7] Building svc/rearcam.jar Dalvik helper service (min-api 19)...")
+    daemon_srcs = glob.glob(os.path.join(BASE_DIR, "daemon", "src", "**", "*.java"), recursive=True)
+    cmd_daemon_javac = [
+        JAVAC, "--release", "8", "-nowarn", "-Xlint:-options",
+        "-cp", ANDROID_JAR,
+        "-d", os.path.join(BUILD_DIR, "daemon_classes"),
+    ] + daemon_srcs
+    subprocess.run(cmd_daemon_javac, check=True)
+    daemon_class_files = []
+    for root, _, files in os.walk(os.path.join(BUILD_DIR, "daemon_classes")):
+        for f in files:
+            if f.endswith(".class"):
+                daemon_class_files.append(os.path.join(root, f))
+    cmd_daemon_d8 = [
+        JAVA, "-cp", D8_JAR, "com.android.tools.r8.D8",
+        "--release", "--min-api", "19",
+        "--lib", ANDROID_JAR,
+        "--output", os.path.join(BUILD_DIR, "daemon_dex"),
+    ] + daemon_class_files
+    subprocess.run(cmd_daemon_d8, check=True)
+    daemon_dex_file = os.path.join(BUILD_DIR, "daemon_dex", "classes.dex")
+    rearcam_jar = os.path.join(BUILD_DIR, "rearcam.jar")
+    with zipfile.ZipFile(rearcam_jar, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write(daemon_dex_file, "classes.dex", compress_type=zipfile.ZIP_DEFLATED)
+    print("  Built rearcam.jar (", os.path.getsize(rearcam_jar), "bytes,", len(daemon_srcs), "sources)")
+
     # 3. Shrink, optimize & convert class files to Dalvik dex (min-api 19) via R8
-    print("\n[3/6] Shrinking & converting bytecode to Dalvik DEX via R8 (min-api 19)...")
+    print("\n[4/7] Shrinking & converting app bytecode to Dalvik DEX via R8 (min-api 19)...")
     class_files = []
     for root, _, files in os.walk(os.path.join(BUILD_DIR, "classes")):
         for f in files:
@@ -145,7 +174,7 @@ def main() -> None:
     print("  Generated classes.dex (", os.path.getsize(dex_file), "bytes)")
 
     # 4. Package resources with aapt
-    print("\n[4/6] Packaging APK resources via aapt...")
+    print("\n[5/7] Packaging APK resources via aapt...")
     unsigned_apk = os.path.join(BUILD_DIR, "unsigned.apk")
     cmd_aapt = [
         AAPT, "package", "-f",
@@ -174,7 +203,7 @@ def main() -> None:
     print("  Injected classes.dex and native libraries into APK.")
 
     # 5. Zipalign & Sign APK
-    print("\n[5/6] Zipaligning & signing APK...")
+    print("\n[6/7] Zipaligning & signing APK...")
     aligned_apk = os.path.join(BUILD_DIR, "aligned.apk")
     cmd_align = [ZIPALIGN, "-f", "4", unsigned_apk, aligned_apk]
     subprocess.run(cmd_align, check=True)
@@ -197,10 +226,11 @@ def main() -> None:
     print("  Successfully signed Fitcamx.apk (", os.path.getsize(final_apk), "bytes)")
 
     # 6. Package HMG-API Mod & NEMESIS Packages
-    print("\n[6/6] Packaging and signing HMG-API Mod & NEMESIS USB archives...")
+    print("\n[7/7] Packaging and signing HMG-API Mod & NEMESIS USB archives...")
     mod_stage = os.path.join(BUILD_DIR, "mod")
     os.makedirs(os.path.join(mod_stage, "app"), exist_ok=True)
     os.makedirs(os.path.join(mod_stage, "icons"), exist_ok=True)
+    os.makedirs(os.path.join(mod_stage, "svc"), exist_ok=True)
 
     shutil.copy2(os.path.join(BASE_DIR, "mod", "mod.json"), mod_stage)
     if os.path.isfile(os.path.join(BASE_DIR, "mod", "open.sh")):
@@ -211,6 +241,7 @@ def main() -> None:
     svc_dir = os.path.join(BASE_DIR, "mod", "svc")
     if os.path.isdir(svc_dir):
         shutil.copytree(svc_dir, os.path.join(mod_stage, "svc"), dirs_exist_ok=True)
+    shutil.copy2(rearcam_jar, os.path.join(mod_stage, "svc", "rearcam.jar"))
     shutil.copy2(final_apk, os.path.join(mod_stage, "app", "Fitcamx.apk"))
     for icon in glob.glob(os.path.join(BASE_DIR, "mod", "icons", "*.png")):
         shutil.copy2(icon, os.path.join(mod_stage, "icons"))

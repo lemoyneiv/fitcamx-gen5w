@@ -9,11 +9,14 @@ public class ClipItem implements Serializable {
 
     public final String name;       // e.g. "CARDV/MOVIE/2026_1107_120000_001F.MP4" or "CARDV/PHOTO/2026_001.JPG"
     public final String filename;   // e.g. "2026_1107_120000_001F.MP4"
+    public final String displayLabel;
     public final long sizeBytes;
     public final String timeStr;
     public final boolean isFront;
     public final boolean isLocked;
     public final boolean isPhoto;
+    public final String localFilePath;
+    public final boolean isOemUsbClip;
     public Boolean isHevc = null; // null = unprobed, true = HEVC (4K/2K), false = AVC (1080p)
 
     public ClipItem(String rawPath, long sizeBytes, String timeStr, int attr) {
@@ -29,6 +32,7 @@ public class ClipItem implements Serializable {
         this.name = clean;
         int lastSlash = clean.lastIndexOf('/');
         this.filename = (lastSlash >= 0) ? clean.substring(lastSlash + 1) : clean;
+        this.displayLabel = this.filename;
         this.sizeBytes = sizeBytes;
         this.timeStr = (timeStr != null) ? timeStr.trim() : "";
 
@@ -43,6 +47,29 @@ public class ClipItem implements Serializable {
                 || upperPath.contains("/RO_") || upperPath.contains("/EMR_") || upperPath.contains("/EVENT_")
                 || upperPath.startsWith("RO/") || upperPath.startsWith("EMR/") || upperPath.startsWith("EVENT/")
                 || upperPath.startsWith("RO_") || upperPath.startsWith("EMR_") || upperPath.startsWith("EVENT_");
+        this.localFilePath = null;
+        this.isOemUsbClip = false;
+    }
+
+    private ClipItem(java.io.File localFile, String timeStr, boolean isLocked, boolean isPhoto, String eventLabel) {
+        this.localFilePath = localFile.getAbsolutePath();
+        this.name = this.localFilePath;
+        this.filename = localFile.getName();
+        this.displayLabel = (eventLabel != null && !eventLabel.trim().isEmpty())
+                ? (this.filename + " \u00B7 " + eventLabel.trim())
+                : this.filename;
+        this.sizeBytes = localFile.length();
+        this.timeStr = (timeStr != null) ? timeStr.trim() : "";
+        this.isFront = false;
+        this.isLocked = isLocked;
+        this.isPhoto = isPhoto;
+        this.isOemUsbClip = true;
+        this.isHevc = Boolean.FALSE;
+    }
+
+    public static ClipItem fromOemUsbFile(java.io.File localFile, String timeStr,
+                                          boolean isLocked, boolean isPhoto, String eventLabel) {
+        return new ClipItem(localFile, timeStr, isLocked, isPhoto, eventLabel);
     }
 
     public static boolean isPhotoFilename(String fileName) {

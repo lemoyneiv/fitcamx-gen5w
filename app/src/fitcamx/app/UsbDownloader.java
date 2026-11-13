@@ -165,8 +165,10 @@ public class UsbDownloader {
 
                     File outFile = new File(destFolder, clip.filename);
                     File partFile = new File(destFolder, clip.filename + ".part");
-                    String httpUrl = clip.getHttpUrl(cameraIp, isJieLi, port);
-                    DebugLogger.log("USB_DL", "Starting atomic download: " + httpUrl + " -> " + outFile.getAbsolutePath());
+                    boolean isLocalCopy = (clip.localFilePath != null && !clip.localFilePath.isEmpty());
+                    String httpUrl = isLocalCopy ? null : clip.getHttpUrl(cameraIp, isJieLi, port);
+                    DebugLogger.log("USB_DL", "Starting atomic transfer: "
+                            + (isLocalCopy ? clip.localFilePath : httpUrl) + " -> " + outFile.getAbsolutePath());
                     HttpURLConnection conn = null;
                     InputStream in = null;
                     FileOutputStream out = null;
@@ -176,29 +178,46 @@ public class UsbDownloader {
                             partFile.delete();
                         }
 
-                        URL url = new URL(httpUrl);
-                        conn = (HttpURLConnection) url.openConnection();
-                        activeConnection = conn;
-                        conn.setRequestMethod("GET");
-                        conn.setRequestProperty("Connection", "close");
-                        conn.setConnectTimeout(5000);
-                        conn.setReadTimeout(12000);
+                        long totalBytes;
+                        if (isLocalCopy) {
+                            File srcFile = new File(clip.localFilePath);
+                            if (!srcFile.isFile() || !srcFile.canRead()) {
+                                throw new Exception("Source USB clip not found: " + clip.localFilePath);
+                            }
+                            if (srcFile.getCanonicalPath().equals(outFile.getCanonicalPath())) {
+                                postComplete(callback, outFile);
+                                return;
+                            }
+                            totalBytes = srcFile.length();
+                            if (totalBytes > 0 && usableSpace > 0 && usableSpace < totalBytes + MIN_HEADROOM_BYTES) {
+                                throw new Exception("Insufficient USB space for " + (totalBytes / (1024L * 1024L)) + " MB file");
+                            }
+                            in = new java.io.FileInputStream(srcFile);
+                        } else {
+                            URL url = new URL(httpUrl);
+                            conn = (HttpURLConnection) url.openConnection();
+                            activeConnection = conn;
+                            conn.setRequestMethod("GET");
+                            conn.setRequestProperty("Connection", "close");
+                            conn.setConnectTimeout(5000);
+                            conn.setReadTimeout(12000);
 
-                        int code = conn.getResponseCode();
-                        DebugLogger.log("USB_DL", "HTTP " + code + " for " + httpUrl);
-                        if (code != 200 && code != 206) {
-                            throw new Exception("HTTP server error code: " + code);
-                        }
+                            int code = conn.getResponseCode();
+                            DebugLogger.log("USB_DL", "HTTP " + code + " for " + httpUrl);
+                            if (code != 200 && code != 206) {
+                                throw new Exception("HTTP server error code: " + code);
+                            }
 
-                        long totalBytes = conn.getContentLength();
-                        if (totalBytes <= 0) {
-                            totalBytes = clip.sizeBytes;
-                        }
-                        if (totalBytes > 0 && usableSpace > 0 && usableSpace < totalBytes + MIN_HEADROOM_BYTES) {
-                            throw new Exception("Insufficient USB space for " + (totalBytes / (1024L * 1024L)) + " MB file");
-                        }
+                            totalBytes = conn.getContentLength();
+                            if (totalBytes <= 0) {
+                                totalBytes = clip.sizeBytes;
+                            }
+                            if (totalBytes > 0 && usableSpace > 0 && usableSpace < totalBytes + MIN_HEADROOM_BYTES) {
+                                throw new Exception("Insufficient USB space for " + (totalBytes / (1024L * 1024L)) + " MB file");
+                            }
 
-                        in = conn.getInputStream();
+                            in = conn.getInputStream();
+                        }
                         activeInputStream = in;
                         out = new FileOutputStream(partFile);
 
@@ -246,8 +265,10 @@ public class UsbDownloader {
                         in.close();
                         in = null;
                         activeInputStream = null;
-                        conn.disconnect();
-                        conn = null;
+                        if (conn != null) {
+                            conn.disconnect();
+                            conn = null;
+                        }
                         activeConnection = null;
 
                         if (outFile.exists() && !outFile.delete()) {

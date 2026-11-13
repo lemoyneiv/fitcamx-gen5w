@@ -4,6 +4,9 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import fitcamx.app.*;
+import fitcamx.rearcam.CarBridge;
+import fitcamx.rearcam.PmapParser;
+import fitcamx.rearcam.RearCamDaemon;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -929,6 +932,366 @@ public class FitcamUnitTests {
               && "CAR_CAM_CM703_7bf6".equals(ordered.get(1)));
     }
 
+    private static void testOemViewRotationAndGeometry() {
+        System.out.println("\n--- 14. OEM Backup Camera View Rotation, Side-by-Side Geometry & Mirror Orientation ---");
+        // Unsupported trims (e.g. 360 SVM type=6 -> hasOemRear=false): silently omit OEM views even if pref set
+        check("computeAvailableViewModes silently hides OEM views on unsupported trims (single & dual Fitcamx)",
+              Arrays.equals(new int[] { CameraClient.VIEW_FRONT },
+                      MainActivity.computeAvailableViewModes(false, false, false))
+              && Arrays.equals(new int[] { CameraClient.VIEW_FRONT },
+                      MainActivity.computeAvailableViewModes(false, false, true))
+              && Arrays.equals(new int[] { CameraClient.VIEW_FRONT, CameraClient.VIEW_DUAL, CameraClient.VIEW_REAR },
+                      MainActivity.computeAvailableViewModes(true, false, true)));
+
+        // Supported Gen5W trim (hasOemRear=true)
+        int[] singleWithOem = new int[] {
+            CameraClient.VIEW_FRONT, MainActivity.VIEW_OEM_DUAL, MainActivity.VIEW_OEM_REAR
+        };
+        int[] dualDefault = new int[] {
+            CameraClient.VIEW_FRONT, CameraClient.VIEW_DUAL, CameraClient.VIEW_REAR
+        };
+        int[] dualWithExtraOem = new int[] {
+            CameraClient.VIEW_FRONT, CameraClient.VIEW_DUAL, CameraClient.VIEW_REAR,
+            MainActivity.VIEW_OEM_DUAL, MainActivity.VIEW_OEM_REAR
+        };
+        check("computeAvailableViewModes enables Side-by-Side & Car Backup for front-only Fitcamx and additively appends them when Advanced Option is enabled",
+              Arrays.equals(singleWithOem, MainActivity.computeAvailableViewModes(false, true, false))
+              && Arrays.equals(dualDefault, MainActivity.computeAvailableViewModes(true, true, false))
+              && Arrays.equals(dualWithExtraOem, MainActivity.computeAvailableViewModes(true, true, true)));
+
+        check("getNextViewMode cycles cleanly through all 5 additive views and falls back to FRONT when mode is absent",
+              MainActivity.getNextViewMode(CameraClient.VIEW_FRONT, dualWithExtraOem) == CameraClient.VIEW_DUAL
+              && MainActivity.getNextViewMode(CameraClient.VIEW_DUAL, dualWithExtraOem) == CameraClient.VIEW_REAR
+              && MainActivity.getNextViewMode(CameraClient.VIEW_REAR, dualWithExtraOem) == MainActivity.VIEW_OEM_DUAL
+              && MainActivity.getNextViewMode(MainActivity.VIEW_OEM_DUAL, dualWithExtraOem) == MainActivity.VIEW_OEM_REAR
+              && MainActivity.getNextViewMode(MainActivity.VIEW_OEM_REAR, dualWithExtraOem) == CameraClient.VIEW_FRONT
+              && MainActivity.getNextViewMode(MainActivity.VIEW_OEM_REAR, dualDefault) == CameraClient.VIEW_FRONT);
+
+        check("getMirrorPrefKey & getViewModeLabel isolate VIEW_OEM_DUAL and VIEW_OEM_REAR settings",
+              "mirror_oem_dual".equals(MainActivity.getMirrorPrefKey(MainActivity.VIEW_OEM_DUAL))
+              && "mirror_oem_rear".equals(MainActivity.getMirrorPrefKey(MainActivity.VIEW_OEM_REAR))
+              && "SIDE-BY-SIDE".equals(MainActivity.getViewModeLabel(MainActivity.VIEW_OEM_DUAL))
+              && "BACKUP".equals(MainActivity.getViewModeLabel(MainActivity.VIEW_OEM_REAR)));
+
+        int overlaySideBySide = MainActivity.computeOemOverlayX(1920, MainActivity.VIEW_OEM_DUAL);
+        int overlayFullRear = MainActivity.computeOemOverlayX(1920, MainActivity.VIEW_OEM_REAR);
+        int frontW1x = MainActivity.computeSideBySideFrontWidthPx(1438, 281, 1920);
+        int frontW15x = MainActivity.computeSideBySideFrontWidthPx(1198, 421, 1920);
+        check("computeOemOverlayX & computeSideBySideFrontWidthPx keep surface_live's RDMA0 hole strictly left of RDMA1 [1200..1920]",
+              overlaySideBySide == 1200
+              && overlayFullRear == 600
+              && (281 + frontW1x) <= overlaySideBySide - 2
+              && (421 + frontW15x) <= overlaySideBySide - 2
+              && frontW1x >= 600 && frontW15x >= 500);
+
+        float[] fit = OemRearView.computeFitBounds(800, 400, 720, 480);
+        check("OemRearView flips raw mirror-sensor frames when Mirror=OFF and preserves 3:2 aspect ratio",
+              OemRearView.shouldFlipRawSensorHorizontally(false)
+              && !OemRearView.shouldFlipRawSensorHorizontally(true)
+              && Math.abs(fit[0] - 100f) < 0.01f
+              && Math.abs(fit[1] - 0f) < 0.01f
+              && Math.abs(fit[2] - 700f) < 0.01f
+              && Math.abs(fit[3] - 400f) < 0.01f);
+
+        check("OemRearCameraClient.describeStatus maps owned, shared, reverse-gear, ignition-off, and error states",
+              "Live Backup Camera".equals(OemRearCameraClient.describeStatus(OemRearCameraClient.STATUS_OWNED_LIVE))
+              && "Live Backup Camera (Shared)".equals(OemRearCameraClient.describeStatus(OemRearCameraClient.STATUS_SHARED_LIVE))
+              && "Reverse Camera Active".equals(OemRearCameraClient.describeStatus(OemRearCameraClient.STATUS_REVERSE))
+              && "Vehicle Ignition Off".equals(OemRearCameraClient.describeStatus(OemRearCameraClient.STATUS_CAR_OFF))
+              && "Starting Backup Camera...".equals(OemRearCameraClient.describeStatus(OemRearCameraClient.STATUS_STARTING))
+              && "Backup Camera Unavailable".equals(OemRearCameraClient.describeStatus(OemRearCameraClient.STATUS_ERROR)));
+    }
+
+    private static void deleteTree(File f) {
+        if (f == null || !f.exists()) return;
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (File c : children) deleteTree(c);
+        }
+        f.delete();
+    }
+
+    private static void testPmapParserAndUsbDashcamScanner() throws Exception {
+        System.out.println("\n--- 15. /proc/pmap Parser, Standalone USB Dashcam Gallery Scanner & Local USB Export ---");
+        String samplePmap =
+                "0x88000000 0x04400000 vmem\n" +
+                "0x8c400000 0x00800000 rearcamera\n" +
+                "0x8cc00000 0x01000000 fb_video\n";
+        long[] region = PmapParser.parsePmapText(samplePmap, PmapParser.REGION_NAME);
+        long[] missing = PmapParser.parsePmapText("0x88000000 0x04400000 vmem\n", PmapParser.REGION_NAME);
+        check("PmapParser parses unsigned 32-bit physical rearcamera base/size on API 19 and validates 4-slot 720x480 ring capacity",
+              region != null
+              && region[0] == 0x8c400000L
+              && region[1] == 0x00800000L
+              && missing == null
+              && PmapParser.fitsRing(region[1], 720, 480)
+              && !PmapParser.fitsRing(4L * 1024L * 1024L, 720, 480));
+
+        String sampleMounts =
+                "tmpfs /mnt/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=5120k,mode=777,uid=1000,gid=1003 0 0\n" +
+                "/dev/block/platform/bdm/by-name/data /data ext4 rw,nosuid,nodev,noatime 0 0\n";
+        check("CarBridge.isTmpfsMountPoint accepts Gen5W /mnt/shm RAM tmpfs and rejects ext4 /data",
+              CarBridge.isTmpfsMountPoint(sampleMounts, "/mnt/shm")
+              && !CarBridge.isTmpfsMountPoint(sampleMounts, "/data")
+              && !CarBridge.isTmpfsMountPoint(sampleMounts, "/mnt/shm/sub"));
+
+        File tempRoot = Files.createTempDirectory("fitcam_usb_dashcam_").toFile();
+        File simShm = new File(tempRoot, "shm");
+        File simData = new File(tempRoot, "data");
+        simShm.mkdirs();
+        simData.mkdirs();
+        String simMounts =
+                "tmpfs " + simShm.getAbsolutePath() + " tmpfs rw,mode=777,uid=1000 0 0\n" +
+                "/dev/block/data " + simData.getAbsolutePath() + " ext4 rw 0 0\n";
+        boolean wroteShm = CarBridge.writeRamMarkerFile(simShm, simMounts, CarBridge.RAM_PGS_MARKER_NAME, true);
+        boolean seenShm = CarBridge.isRamMarkerFilePresent(simShm, simMounts, CarBridge.RAM_PGS_MARKER_NAME);
+        boolean clearedShm = CarBridge.writeRamMarkerFile(simShm, simMounts, CarBridge.RAM_PGS_MARKER_NAME, false);
+        boolean goneShm = !CarBridge.isRamMarkerFilePresent(simShm, simMounts, CarBridge.RAM_PGS_MARKER_NAME);
+        boolean refusedExt4 = !CarBridge.writeRamMarkerFile(simData, simMounts, CarBridge.RAM_PGS_MARKER_NAME, true)
+                && !new File(simData, CarBridge.RAM_PGS_MARKER_NAME).exists();
+        check("CarBridge RAM PGS marker sets/clears cleanly on tmpfs and refuses to touch ext4 flash directories",
+              wroteShm && seenShm && clearedShm && goneShm && refusedExt4);
+
+        check("RearCamDaemon.parseExternalHeartbeatPid extracts live gen5-RearDashcam PID and rejects malformed inputs",
+              RearCamDaemon.parseExternalHeartbeatPid("4120 88\n") == 4120
+              && RearCamDaemon.parseExternalHeartbeatPid("995") == 995
+              && RearCamDaemon.parseExternalHeartbeatPid("") == -1
+              && RearCamDaemon.parseExternalHeartbeatPid(null) == -1
+              && RearCamDaemon.parseExternalHeartbeatPid("0 1\n") == -1
+              && RearCamDaemon.parseExternalHeartbeatPid("bad 12\n") == -1);
+
+        String activeReversingStatus = "state=reversing\nenabled=true\ndrive=true\nout=/storage/usb0/Dashcam\n";
+        String activeStartingStatus = "state=starting\nenabled=true\ndrive=true\nout=/storage/usb0/Dashcam\n";
+        String activeRecordingStatus = "state=recording\nenabled=true\ndrive=true\nout=/storage/usb0/Dashcam\n";
+        String activeLiveStatus = "state=live\nenabled=false\ndrive=false\n";
+        String disabledStatus = "state=off\nenabled=false\ndrive=true\n";
+        String noDriveStatus = "state=nodrive\nenabled=true\ndrive=false\n";
+        String carOffStatus = "state=caroff\nenabled=true\ndrive=true\n";
+        check("RearCamDaemon.shouldDeferToExternalRecorder yields during gen5-RearDashcam settle/recording and ignores dead/disabled/nodrive states",
+              RearCamDaemon.shouldDeferToExternalRecorder(activeReversingStatus, true)
+              && RearCamDaemon.shouldDeferToExternalRecorder(activeStartingStatus, true)
+              && RearCamDaemon.shouldDeferToExternalRecorder(activeRecordingStatus, true)
+              && RearCamDaemon.shouldDeferToExternalRecorder(activeLiveStatus, true)
+              && !RearCamDaemon.shouldDeferToExternalRecorder(activeRecordingStatus, false)
+              && !RearCamDaemon.shouldDeferToExternalRecorder(disabledStatus, true)
+              && !RearCamDaemon.shouldDeferToExternalRecorder(noDriveStatus, true)
+              && !RearCamDaemon.shouldDeferToExternalRecorder(carOffStatus, true));
+
+        UsbDownloader localExporter = new UsbDownloader();
+        try {
+            File dashcamDir = new File(tempRoot, "Dashcam");
+            File savedDir = new File(dashcamDir, "Saved");
+            File snapDir = new File(dashcamDir, "Snapshots");
+            File exportDir = new File(tempRoot, "ExportDest");
+            savedDir.mkdirs();
+            snapDir.mkdirs();
+            exportDir.mkdirs();
+
+            File statusFile = new File(tempRoot, "status");
+            Files.write(statusFile.toPath(),
+                    ("running=1\nout=" + dashcamDir.getAbsolutePath() + "\n").getBytes(StandardCharsets.UTF_8));
+            check("UsbDashcamScanner.readConfiguredOutDir parses custom out= path from status file",
+                  dashcamDir.getAbsolutePath().equals(UsbDashcamScanner.readConfiguredOutDir(statusFile)));
+
+            byte[] dummyTs = new byte[188 * 4];
+            Arrays.fill(dummyTs, (byte) 0x47);
+            Files.write(new File(dashcamDir, "20261111_142205.ts").toPath(), dummyTs);
+            Files.write(new File(dashcamDir, "20261111_142305_1.ts").toPath(), dummyTs);
+            Files.write(new File(dashcamDir, "20261111_142400.ts").toPath(), new byte[0]); // 0-byte incomplete -> ignored
+
+            File savedClipFile = new File(savedDir, "20261111_142500.ts");
+            Files.write(savedClipFile.toPath(), dummyTs);
+            Files.write(new File(savedDir, "names.txt").toPath(),
+                    "20261111_142500.ts\tNear Miss\n".getBytes(StandardCharsets.UTF_8));
+
+            byte[] dummyPng = new byte[] { (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            Files.write(new File(snapDir, "snap_20261111_142610.png").toPath(), dummyPng);
+
+            List<ClipItem> scanned = UsbDashcamScanner.scanDashcamDirectory(dashcamDir);
+            XmlListParser.sortClipsDescending(scanned);
+
+            ClipItem foundSaved = null;
+            ClipItem foundSnap = null;
+            boolean allOemRear = true;
+            for (ClipItem c : scanned) {
+                if (!c.isOemUsbClip || c.isFront) allOemRear = false;
+                if ("20261111_142500.ts".equals(c.filename)) foundSaved = c;
+                if ("snap_20261111_142610.png".equals(c.filename)) foundSnap = c;
+            }
+            check("UsbDashcamScanner discovers loop .ts, Saved/*.ts with names.txt event label, and Snapshots/*.png while skipping 0-byte files",
+                  scanned.size() == 4
+                  && allOemRear
+                  && foundSaved != null
+                  && foundSaved.isLocked
+                  && !foundSaved.isPhoto
+                  && "2026/11/11 14:25:00".equals(foundSaved.timeStr)
+                  && "20261111_142500.ts \u00B7 Near Miss".equals(foundSaved.displayLabel)
+                  && foundSnap != null
+                  && foundSnap.isPhoto
+                  && !foundSnap.isLocked
+                  && "2026/11/11 14:26:10".equals(foundSnap.timeStr));
+
+            // Verify atomic local copy via UsbDownloader without HTTP
+            final CountDownLatch copyLatch = new CountDownLatch(1);
+            final AtomicReference<File> copiedRef = new AtomicReference<File>(null);
+            localExporter.downloadClipToFolder(foundSaved, "192.168.1.254", false, 80, exportDir,
+                    new UsbDownloader.DownloadCallback() {
+                        @Override public void onProgress(int p, double s, long d, long t) {}
+                        @Override public void onComplete(File dest) { copiedRef.set(dest); copyLatch.countDown(); }
+                        @Override public void onError(Exception e) { copyLatch.countDown(); }
+                    });
+            boolean copyDone = copyLatch.await(3, TimeUnit.SECONDS);
+            File copiedFile = copiedRef.get();
+            check("UsbDownloader atomically copies local USB Dashcam clip to destination folder offline",
+                  copyDone && copiedFile != null && copiedFile.isFile() && copiedFile.length() == dummyTs.length);
+        } finally {
+            localExporter.shutdown();
+            deleteTree(tempRoot);
+        }
+    }
+
+    private static void testFormatSdCardAndRearProbe() throws Exception {
+        System.out.println("\n--- 16. Non-Disruptive Rear Channel Probe & Format SD Card Recovery Sequence ---");
+        check("inferRearChannelFromStatusXml detects dual-cam index>=6 (TRUE), missing 3028 (FALSE), and ambiguous single index (null)",
+              Boolean.TRUE.equals(CameraClient.inferRearChannelFromStatusXml(
+                      "<Function><Cmd>2002</Cmd><Status>6</Status><Cmd>3028</Cmd><Status>0</Status></Function>"))
+              && Boolean.FALSE.equals(CameraClient.inferRearChannelFromStatusXml(
+                      "<Function><Cmd>2002</Cmd><Status>0</Status><Cmd>2001</Cmd><Status>1</Status></Function>"))
+              && CameraClient.inferRearChannelFromStatusXml(
+                      "<Function><Cmd>2002</Cmd><Status>0</Status><Cmd>3028</Cmd><Status>0</Status></Function>") == null);
+
+        final List<String> requests = Collections.synchronizedList(new ArrayList<String>());
+        final AtomicBoolean disableMovieDirHtml = new AtomicBoolean(false);
+        final AtomicBoolean serveRearInMovieDir = new AtomicBoolean(false);
+        final AtomicInteger rear3028Status = new AtomicInteger(-13);
+        final AtomicInteger activeMode = new AtomicInteger(1); // 1 = Movie, 2 = Playback/System
+        final AtomicInteger formatCalls = new AtomicInteger(0);
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange ex) throws IOException {
+                String path = ex.getRequestURI().getPath();
+                String query = ex.getRequestURI().getRawQuery();
+                requests.add(query != null ? query : path);
+                if ("/CARDV/MOVIE/".equals(path) && disableMovieDirHtml.get()) {
+                    byte[] nf = "Not Found".getBytes(StandardCharsets.UTF_8);
+                    ex.sendResponseHeaders(404, nf.length);
+                    OutputStream os = ex.getResponseBody();
+                    os.write(nf);
+                    os.close();
+                    return;
+                }
+                byte[] resp;
+                if ("/CARDV/MOVIE/".equals(path)) {
+                    String html = serveRearInMovieDir.get()
+                            ? "<html><a href=\"20261111_120000A.TS\">A</a><a href=\"20261111_120000B.TS\">B</a></html>"
+                            : "<html><a href=\"20261111_120000A.TS\">A1</a><a href=\"20261111_120100A.TS\">A2</a></html>";
+                    resp = html.getBytes(StandardCharsets.UTF_8);
+                } else if (query != null && query.contains("cmd=3028&par=1")) {
+                    resp = ("<Function><Cmd>3028</Cmd><Status>" + rear3028Status.get() + "</Status></Function>")
+                            .getBytes(StandardCharsets.UTF_8);
+                } else if (query != null && query.contains("cmd=3001&par=2")) {
+                    activeMode.set(2);
+                    resp = "<Function><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                } else if (query != null && query.contains("cmd=3001&par=1")) {
+                    activeMode.set(1);
+                    resp = "<Function><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                } else if (query != null && query.contains("cmd=3010&par=1")) {
+                    formatCalls.incrementAndGet();
+                    // Simulate NT96675 firmware that returns -13 until switched to mode 2
+                    int st = (activeMode.get() == 2) ? 0 : -13;
+                    resp = ("<Function><Cmd>3010</Cmd><Status>" + st + "</Status></Function>").getBytes(StandardCharsets.UTF_8);
+                } else {
+                    resp = "<Function><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                }
+                ex.sendResponseHeaders(200, resp.length);
+                OutputStream os = ex.getResponseBody();
+                os.write(resp);
+                os.close();
+            }
+        });
+        server.start();
+
+        CameraClient cam = new CameraClient("127.0.0.1");
+        cam.setSocType(CameraClient.SocType.NOVATEK, server.getAddress().getPort());
+        try {
+            // 1. Front-only non-disruptive HTTP movie index probe
+            final CountDownLatch p1Latch = new CountDownLatch(1);
+            final AtomicReference<Boolean> p1Res = new AtomicReference<Boolean>(Boolean.TRUE);
+            cam.probeRearChannelNonDisruptive(new CameraClient.Callback<Boolean>() {
+                @Override public void onSuccess(Boolean r) { p1Res.set(r); p1Latch.countDown(); }
+                @Override public void onError(Exception e) { p1Latch.countDown(); }
+            });
+            p1Latch.await(3, TimeUnit.SECONDS);
+            boolean sentStopRecDuringProbe = false;
+            synchronized (requests) {
+                for (String q : requests) {
+                    if (q.contains("cmd=2001")) sentStopRecDuringProbe = true;
+                }
+            }
+            check("probeRearChannelNonDisruptive detects front-only Fitcamx (Boolean.FALSE) without stopping loop recording",
+                  Boolean.FALSE.equals(p1Res.get()) && !sentStopRecDuringProbe);
+
+            // 2. Dual-channel non-disruptive HTTP movie index probe
+            serveRearInMovieDir.set(true);
+            final CountDownLatch p2Latch = new CountDownLatch(1);
+            final AtomicReference<Boolean> p2Res = new AtomicReference<Boolean>(null);
+            cam.probeRearChannelNonDisruptive(new CameraClient.Callback<Boolean>() {
+                @Override public void onSuccess(Boolean r) { p2Res.set(r); p2Latch.countDown(); }
+                @Override public void onError(Exception e) { p2Latch.countDown(); }
+            });
+            p2Latch.await(3, TimeUnit.SECONDS);
+            check("probeRearChannelNonDisruptive detects dual-channel Fitcamx (Boolean.TRUE) when *B.TS rear clips exist",
+                  Boolean.TRUE.equals(p2Res.get()));
+
+            // 2b. Disabled HFS HTML directory index -> cmd=3028&par=1 fallback + immediate cmd=3028&par=0 restore
+            disableMovieDirHtml.set(true);
+            rear3028Status.set(-13);
+            requests.clear();
+            final CountDownLatch p3Latch = new CountDownLatch(1);
+            final AtomicReference<Boolean> p3Res = new AtomicReference<Boolean>(Boolean.TRUE);
+            cam.probeRearChannelNonDisruptive(new CameraClient.Callback<Boolean>() {
+                @Override public void onSuccess(Boolean r) { p3Res.set(r); p3Latch.countDown(); }
+                @Override public void onError(Exception e) { p3Latch.countDown(); }
+            });
+            p3Latch.await(3, TimeUnit.SECONDS);
+            boolean restoredFront3028 = false;
+            synchronized (requests) {
+                for (String q : requests) {
+                    if (q.contains("cmd=3028&par=0")) restoredFront3028 = true;
+                }
+            }
+            check("probeRearChannelNonDisruptive falls back to cmd=3028&par=1 when HFS HTML index is disabled and restores cmd=3028&par=0",
+                  Boolean.FALSE.equals(p3Res.get()) && restoredFront3028);
+
+            // 3. Format SD Card with -13 Playback-mode retry + automatic Movie/recording resumption
+            requests.clear();
+            final CountDownLatch fmtLatch = new CountDownLatch(1);
+            final AtomicBoolean fmtOk = new AtomicBoolean(false);
+            cam.formatSdCard(new CameraClient.Callback<Boolean>() {
+                @Override public void onSuccess(Boolean r) { fmtOk.set(Boolean.TRUE.equals(r)); fmtLatch.countDown(); }
+                @Override public void onError(Exception e) { fmtLatch.countDown(); }
+            });
+            boolean finished = fmtLatch.await(6, TimeUnit.SECONDS);
+            int lastFmtIdx = -1, resumeModeIdx = -1, resumeRecIdx = -1;
+            synchronized (requests) {
+                for (int i = 0; i < requests.size(); i++) {
+                    String q = requests.get(i);
+                    if (q.contains("cmd=3010&par=1")) lastFmtIdx = i;
+                    if (lastFmtIdx >= 0 && i > lastFmtIdx && q.contains("cmd=3001&par=1")) resumeModeIdx = i;
+                    if (lastFmtIdx >= 0 && i > lastFmtIdx && q.contains("cmd=2001&par=1")) resumeRecIdx = i;
+                }
+            }
+            check("formatSdCard retries cmd=3010&par=1 via Playback mode on -13 and automatically resumes Movie mode + loop recording",
+                  finished && fmtOk.get() && formatCalls.get() == 2
+                  && lastFmtIdx > 0 && resumeModeIdx > lastFmtIdx && resumeRecIdx > resumeModeIdx);
+        } finally {
+            cam.shutdown();
+            server.stop(0);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== FITCAMX Gen5W Automated Java Unit & Integration Test Suite ===\n");
         testDebugLoggerRamOnly();
@@ -944,6 +1307,9 @@ public class FitcamUnitTests {
         testMaterial3ThemeEngine();
         testLiveWatchdogKeepaliveAndMirrorOptions();
         testWifiCustomPasswordAndManualFallback();
+        testOemViewRotationAndGeometry();
+        testPmapParserAndUsbDashcamScanner();
+        testFormatSdCardAndRearProbe();
 
         System.out.println("\n=== Java Test Summary: " + passed + " passed, " + failed + " failed ===");
         if (failed > 0) {

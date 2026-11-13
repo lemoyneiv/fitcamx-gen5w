@@ -57,13 +57,19 @@ def check(name: str, cond: bool, detail: str = ""):
 
 def run_build_if_needed(force_rebuild: bool):
     dex_path = os.path.join(BUILD_DIR, "dex", "classes.dex")
+    daemon_dex_path = os.path.join(BUILD_DIR, "daemon_dex", "classes.dex")
+    rearcam_jar_path = os.path.join(BUILD_DIR, "rearcam.jar")
     apk_path = os.path.join(BUILD_DIR, "Fitcamx.apk")
     classes_dir = os.path.join(BUILD_DIR, "classes")
+    daemon_classes_dir = os.path.join(BUILD_DIR, "daemon_classes")
     dist_zips = glob.glob(os.path.join(BASE_DIR, "dist", "fitcamx-gen5w-v*.zip"))
     if force_rebuild or not (
         os.path.isfile(dex_path)
+        and os.path.isfile(daemon_dex_path)
+        and os.path.isfile(rearcam_jar_path)
         and os.path.isfile(apk_path)
         and os.path.isdir(classes_dir)
+        and os.path.isdir(daemon_classes_dir)
         and len(dist_zips) >= 4
     ):
         print("=== [Step 1] Building APK & HMG-API Package ===")
@@ -88,26 +94,22 @@ def run_java_unit_tests():
 
         lib_jars = glob.glob(os.path.join(BASE_DIR, "app", "libs", "*.jar"))
         app_classes = os.path.join(BUILD_DIR, "classes")
-        compile_cp = os.pathsep.join([shim_out, app_classes, ANDROID_JAR] + lib_jars)
+        daemon_classes = os.path.join(BUILD_DIR, "daemon_classes")
+        compile_cp = os.pathsep.join([shim_out, app_classes, daemon_classes, ANDROID_JAR] + lib_jars)
         subprocess.run(
             [JAVAC, "--release", "8", "-cp", compile_cp, "-d", test_out, os.path.join(TESTS_DIR, "FitcamUnitTests.java")],
             check=True,
         )
 
-        runtime_cp = os.pathsep.join([test_out, shim_out, app_classes] + lib_jars + [ANDROID_JAR])
+        runtime_cp = os.pathsep.join([test_out, shim_out, app_classes, daemon_classes] + lib_jars + [ANDROID_JAR])
         res = subprocess.run([JAVA, "-cp", runtime_cp, "FitcamUnitTests"])
         check("FitcamUnitTests.java suite exited cleanly", res.returncode == 0)
 
 
-def verify_dex_and_jni():
-    print("\n=== [Step 3] Verifying Dalvik API 19 DEX Bytecode & JNI Keep Targets ===")
-    dex_file = os.path.join(BUILD_DIR, "dex", "classes.dex")
+def _audit_dex_against_api19(dex_file: str, label: str, pkg_prefix: str, api19_classes: set) -> set:
     with open(dex_file, "rb") as f:
         magic = f.read(8)
-    check("DEX header uses Dalvik KitKat magic 'dex\\n035\\0'", magic == b"dex\n035\x00", repr(magic))
-
-    with zipfile.ZipFile(ANDROID_JAR, "r") as z:
-        api19_classes = {"L" + n[:-6] + ";" for n in z.namelist() if n.endswith(".class")}
+    check(f"{label} DEX header uses Dalvik KitKat magic 'dex\\n035\\0'", magic == b"dex\n035\x00", repr(magic))
 
     out = subprocess.check_output([DEXDUMP, "-f", dex_file], text=True)
     class_blocks = out.split("Class #")[1:]
@@ -135,26 +137,43 @@ def verify_dex_and_jni():
                     super_iface_hazards.append((cls, "INTERFACE", iface))
 
     check(
-        "Zero missing superclass/interface Dalvik verification hazards on API 19",
+        f"{label}: Zero missing superclass/interface Dalvik verification hazards on API 19",
         len(super_iface_hazards) == 0,
         f"{len(defined_classes)} DEX classes checked, hazards={super_iface_hazards}",
     )
 
     disasm = subprocess.check_output([DEXDUMP, "-d", dex_file], text=True, errors="replace")
     current_cls = None
-    fitcamx_missing = set()
+    missing_refs = set()
     for line in disasm.splitlines():
         m_c = re.match(r"\s*Class descriptor\s*:\s*'([^']+)'", line)
         if m_c:
             current_cls = m_c.group(1)
             continue
-        if current_cls and current_cls.startswith("Lfitcamx/"):
+        if current_cls and current_cls.startswith(pkg_prefix):
             if any(op in line for op in ("invoke-", "sget", "iget", "new-instance", "check-cast")):
                 for ref in re.findall(r"(L[a-zA-Z0-9_/$]+;)", line):
                     if ref not in api19_classes and ref not in defined_classes:
-                        fitcamx_missing.add((current_cls, ref))
+                        missing_refs.add((current_cls, ref))
 
-    check("Zero missing type references inside fitcamx.app.*", len(fitcamx_missing) == 0, str(sorted(fitcamx_missing)))
+    check(f"{label}: Zero missing type references inside {pkg_prefix}*", len(missing_refs) == 0, str(sorted(missing_refs)))
+    return defined_classes
+
+
+def verify_dex_and_jni():
+    print("\n=== [Step 3] Verifying Dalvik API 19 DEX Bytecode & JNI Keep Targets ===")
+    with zipfile.ZipFile(ANDROID_JAR, "r") as z:
+        api19_classes = {"L" + n[:-6] + ";" for n in z.namelist() if n.endswith(".class")}
+
+    dex_file = os.path.join(BUILD_DIR, "dex", "classes.dex")
+    defined_classes = _audit_dex_against_api19(dex_file, "Fitcamx.apk", "Lfitcamx/app/", api19_classes)
+
+    daemon_dex_file = os.path.join(BUILD_DIR, "daemon_dex", "classes.dex")
+    daemon_classes = _audit_dex_against_api19(daemon_dex_file, "svc/rearcam.jar", "Lfitcamx/rearcam/", api19_classes)
+    check(
+        "svc/rearcam.jar bundles RearCamDaemon & PmapParser DEX classes",
+        "Lfitcamx/rearcam/RearCamDaemon;" in daemon_classes and "Lfitcamx/rearcam/PmapParser;" in daemon_classes,
+    )
 
     required_jni_classes = [
         "Lorg/videolan/libvlc/AWindow;",
@@ -230,11 +249,18 @@ def read_png_dimensions(path: str):
 
 def verify_operational_invariants():
     print("\n=== [Step 5] Verifying AGENT_GUIDE.md Invariants, Manifest, mod.json & Scripts ===")
-    # 1. Privacy invariant: zero "Android Auto" mentions in app/src or app/res
+    # 1. Privacy invariant: zero "Android Auto" mentions in app/src, app/res, or daemon/src
     aa_hits = []
     set_fixed_size_hits = []
-    for root_sub in ("src", "res"):
-        for root, _, files in os.walk(os.path.join(BASE_DIR, "app", root_sub)):
+    scan_roots = [
+        os.path.join(BASE_DIR, "app", "src"),
+        os.path.join(BASE_DIR, "app", "res"),
+        os.path.join(BASE_DIR, "daemon", "src"),
+    ]
+    for scan_root in scan_roots:
+        if not os.path.isdir(scan_root):
+            continue
+        for root, _, files in os.walk(scan_root):
             for fn in files:
                 if fn.endswith((".java", ".xml")):
                     fp = os.path.join(root, fn)
@@ -248,8 +274,12 @@ def verify_operational_invariants():
                         if ".setFixedSize(" in code_no_comments:
                             set_fixed_size_hits.append(os.path.relpath(fp, BASE_DIR))
 
-    check("Zero 'Android Auto' references in app/src and app/res", len(aa_hits) == 0, str(aa_hits))
-    check("Zero SurfaceHolder.setFixedSize() calls in app/src", len(set_fixed_size_hits) == 0, str(set_fixed_size_hits))
+    check("Zero 'Android Auto' references in app/src, app/res, and daemon/src", len(aa_hits) == 0, str(aa_hits))
+    check("Zero SurfaceHolder.setFixedSize() calls in app/src and daemon/src", len(set_fixed_size_hits) == 0, str(set_fixed_size_hits))
+
+    layout_main_txt = open(os.path.join(BASE_DIR, "app", "res", "layout", "activity_main.xml"), "r", encoding="utf-8").read()
+    check("activity_main.xml displays 'by lemoyneiv' author credit under FITCAMX logo",
+          "tv_author_credit" in layout_main_txt and 'android:text="by lemoyneiv"' in layout_main_txt)
 
     # 2. AndroidManifest.xml checks
     manifest_path = os.path.join(BASE_DIR, "app", "AndroidManifest.xml")
@@ -273,6 +303,8 @@ def verify_operational_invariants():
     mod_ver = mod_obj.get("version", "")
     mod_id = mod_obj.get("id", "fitcamx-gen5w")
     check("AndroidManifest.xml versionName matches mod/mod.json version", f'android:versionName="{mod_ver}"' in manifest_txt, f"version={mod_ver}")
+    check("mod/mod.json declares authors=['lemoyneiv'] and version='1.0.0'",
+          mod_obj.get("authors") == ["lemoyneiv"] and mod_ver == "1.0.0")
     check("mod/mod.json has NO 'media.codecs' dependency", "media.codecs" not in mod_raw and "depends" not in mod_obj)
     check("mod/mod.json declares wifi.client=true and usb=['DashcamFootage']",
           mod_obj.get("wifi", {}).get("client") is True and mod_obj.get("usb") == ["DashcamFootage"])
@@ -282,6 +314,13 @@ def verify_operational_invariants():
           and screenshot_svc.get("user") == "root"
           and screenshot_svc.get("start") == "manual"
           and screenshot_svc.get("restart") is False)
+    rearcam_svc = next((s for s in mod_obj.get("services", []) if isinstance(s, dict) and s.get("name") == "rearcam"), {})
+    check("mod/mod.json declares manual system rearcam jar service (svc/rearcam.jar)",
+          rearcam_svc.get("jar") == "svc/rearcam.jar"
+          and rearcam_svc.get("class") == "fitcamx.rearcam.RearCamDaemon"
+          and rearcam_svc.get("user") == "system"
+          and rearcam_svc.get("start") == "manual"
+          and rearcam_svc.get("restart") is False)
 
     # 4. Launcher icons 128x128
     tile_dim = read_png_dimensions(os.path.join(BASE_DIR, "mod", "icons", "tile.png"))
