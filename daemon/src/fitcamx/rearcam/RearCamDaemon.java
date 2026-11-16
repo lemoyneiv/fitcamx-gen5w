@@ -371,6 +371,21 @@ public final class RearCamDaemon {
             return;
         }
 
+        if (initialCmd == 'X') {
+            int peerUid = -1;
+            try {
+                peerUid = socket.getPeerCredentials().getUid();
+            } catch (Throwable ignored) {}
+            if (peerUid == 0) {
+                sEngine.stopSessionImmediate("daemon shutdown");
+                CarBridge.restoreGuideLines(false);
+                out.writeInt(PROTOCOL_MAGIC);
+                out.flush();
+                System.exit(0);
+            }
+            return;
+        }
+
         if (initialCmd != 'S') {
             return;
         }

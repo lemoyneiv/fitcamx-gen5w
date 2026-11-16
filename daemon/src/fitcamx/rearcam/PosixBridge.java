@@ -260,14 +260,43 @@ public final class PosixBridge {
     }
 
     public static int getPackageUid(String packageName) {
+        if (packageName == null || packageName.isEmpty()) return -1;
         try {
             Object pm = Class.forName("android.app.AppGlobals").getMethod("getPackageManager").invoke(null);
-            if (pm == null) return -1;
-            return (Integer) Class.forName("android.content.pm.IPackageManager")
-                    .getMethod("getPackageUid", String.class, int.class)
-                    .invoke(pm, packageName, 0);
-        } catch (Throwable t) {
+            if (pm != null) {
+                int uid = (Integer) Class.forName("android.content.pm.IPackageManager")
+                        .getMethod("getPackageUid", String.class, int.class)
+                        .invoke(pm, packageName, 0);
+                if (uid > 0) return uid;
+            }
+        } catch (Throwable ignored) {}
+        return parsePackageUidFromPackagesList(packageName, new java.io.File("/data/system/packages.list"));
+    }
+
+    public static int parsePackageUidFromPackagesList(String packageName, java.io.File listFile) {
+        if (packageName == null || packageName.isEmpty() || listFile == null || !listFile.isFile()) {
             return -1;
         }
+        java.io.BufferedReader br = null;
+        try {
+            br = new java.io.BufferedReader(new java.io.FileReader(listFile));
+            String prefix = packageName + " ";
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith(prefix)) {
+                    String rest = line.substring(prefix.length()).trim();
+                    int sp = rest.indexOf(' ');
+                    String uidTok = sp > 0 ? rest.substring(0, sp) : rest;
+                    int uid = Integer.parseInt(uidTok);
+                    return uid > 0 ? uid : -1;
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (br != null) {
+                try { br.close(); } catch (Throwable ignored) {}
+            }
+        }
+        return -1;
     }
 }

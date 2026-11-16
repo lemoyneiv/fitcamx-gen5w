@@ -124,14 +124,18 @@ def _inspect_package_uuid(zip_files: list[str]) -> str | None:
                 manifest = json.loads(z.read("META-HMGAPI/manifest.json"))
                 return manifest.get("uuid")
     for zp in zip_files:
-        if zp.endswith("-hmgapi-usb.zip"):
+        if zp.endswith("-usb.zip"):
             with zipfile.ZipFile(zp, "r") as outer:
-                inner_names = [n for n in outer.namelist() if n.endswith(".zip")]
-                if inner_names:
+                inner_names = [
+                    n for n in outer.namelist()
+                    if n.startswith("HMGAPI/updates/") and n.endswith(".zip")
+                ] or [n for n in outer.namelist() if n.endswith(".zip")]
+                for name in inner_names:
                     import io
-                    with zipfile.ZipFile(io.BytesIO(outer.read(inner_names[0])), "r") as inner:
-                        manifest = json.loads(inner.read("META-HMGAPI/manifest.json"))
-                        return manifest.get("uuid")
+                    with zipfile.ZipFile(io.BytesIO(outer.read(name)), "r") as inner:
+                        if "META-HMGAPI/manifest.json" in inner.namelist():
+                            manifest = json.loads(inner.read("META-HMGAPI/manifest.json"))
+                            return manifest.get("uuid")
     return None
 
 

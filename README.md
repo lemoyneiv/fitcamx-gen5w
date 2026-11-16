@@ -4,9 +4,9 @@
 ![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)
 ![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v1.0.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v1.1.0-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
-A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" displays). Stream live video from **FITCAMX** integrated Wi-Fi dashcams, view your vehicle's OEM analog backup camera, review SD card & USB dashcam clips, and export footage directly to a USB flash drive — with zero external codec packs or system modifications required.
+A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" displays). Stream live video from **FITCAMX** integrated Wi-Fi dashcams, view your vehicle's OEM analog backup camera, review SD card & USB dashcam clips, and export footage directly to a USB flash drive — with zero external codec packs required and full support for **both HMG-API and standalone NEMESIS** setups.
 
 **[Screenshots](#screenshots)** · **[Installation](#installation)** · **[Usage Guide](#usage-guide)** · **[`gen5-RearDashcam` Coexistence](#car-backup-camera--coexistence-with-gen5-reardashcam)** · **[Supported Vehicles](#supported-vehicles--hardware)**
 
@@ -58,17 +58,22 @@ A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis 
 ## Installation
 
 ### Prerequisites
-- A Gen5W head unit rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (`v1.0.0+`, recommended) or **NEMESIS Manager**.
+- A Gen5W head unit rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (`v1.0.0+`) **or** **NEMESIS Manager** (*HMG-API is optional — standalone NEMESIS with Tilepad or any 3rd-party launcher is fully supported*).
 
-### Method 1: HMG-API USB Installation (Recommended)
-1. Download [**`fitcamx-gen5w-v1.0.0-hmgapi-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.0.0/fitcamx-gen5w-v1.0.0-hmgapi-usb.zip) from the [Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/tag/v1.0.0).
-2. Extract the archive to the root of a FAT32-formatted USB flash drive (producing `HMGAPI/updates/fitcamx-gen5w-v1.0.0.zip`).
-3. Insert the USB drive into the vehicle's multimedia USB port and open **HMG-API** on the head unit.
-4. Go to **Updates** → select **FITCAMX Dashcam** → tap **Install** → tap **Apply changes**, then **Restart unit**.
+### Universal USB Installer (Single Download for Both HMG-API & NEMESIS)
+1. Download [**`fitcamx-gen5w-v1.1.0-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.1.0/fitcamx-gen5w-v1.1.0-usb.zip) from the [Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/latest).
+2. Extract the archive to the **root (top level)** of a FAT32- or exFAT-formatted USB flash drive so `HMGAPI/`, `packages/`, and `NEMESIS.data` sit at the root of the drive.
+3. Insert the USB drive into the vehicle's multimedia USB port and install using whichever manager is on your head unit:
 
-### Method 2: NEMESIS Manager
-1. Download [**`fitcamx-gen5w-v1.0.0-nemesis-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.0.0/fitcamx-gen5w-v1.0.0-nemesis-usb.zip) (or [**`fitcamx-gen5w-v1.0.0-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.0.0/fitcamx-gen5w-v1.0.0-nemesis-package.zip)) and copy it to your USB drive.
-2. Open **NEMESIS Manager** on the head unit and install the package.
+#### Option A: Install via HMG-API
+- Open **HMG-API** → go to **Updates** → select **FITCAMX Dashcam** → tap **Install** → tap **Apply changes** (and **Restart unit** if prompted).
+- Adds the native **FITCAMX** tile directly to the stock Gen5W home screen.
+
+#### Option B: Install via NEMESIS Manager (Works With *or* Without HMG-API)
+- Open **NEMESIS Manager** and approve the USB installation prompt (or install [**`fitcamx-gen5w-v1.1.0-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.1.0/fitcamx-gen5w-v1.1.0-nemesis-package.zip) directly).
+- The adaptive installer automatically detects your environment:
+  - **HMG-API installed:** Registers the mod in HMG-API with the stock Gen5W home-screen launcher tile.
+  - **No HMG-API installed (Standalone NEMESIS):** Automatically enables Gen5W Wi-Fi client mode with safe `/system` backups (preserving pre-existing Tilepad Wi-Fi settings), installs **FITCAMX** for **Tilepad** / 3rd-party launchers, and runs a zero-wear root service broker so OEM Car Backup Camera live view, `gen5-RearDashcam` coexistence, USB screenshots, and **Exit & Reboot** work with full feature parity. Restart the head unit once if prompted to finish enabling Wi-Fi.
 
 ---
 

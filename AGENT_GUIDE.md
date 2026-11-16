@@ -13,7 +13,7 @@ This document is the authoritative engineering guide for AI agents and human dev
 | **Architecture** | 32-bit ARMv7 (`armeabi-v7a`) | All JNI native libraries must be compiled for `armeabi-v7a`. 64-bit binaries will fail to load. |
 | **Display Ratio** | 24:9 / 8:3 Ultra-Widescreen (1920x720 / 2560x720) | Must maintain `<meta-data android:name="android.max_aspect" android:value="4.0" />` in `AndroidManifest.xml`. Never use fixed 16:9 assumptions for layout margins. |
 | **Packaging & Signing** | Android v1 JAR Signing (apksigner) | Android 4.4.2 does **NOT** support APK Signature Scheme v2. You must always sign with `--v1-signing-enabled true --v2-signing-enabled false`. |
-| **Root Platform** | HMG-API (v1.0.0+) / NEMESIS | Mod package is signed with ECDSA SHA256 over `META-HMGAPI/manifest.json`. Root IPC uses `HmgapidClient` (`LFD1` protocol). |
+| **Root Platform** | HMG-API (`v1.0.0+`) **or** Standalone NEMESIS | Signed HMG-API mod (`META-HMGAPI/manifest.json`) + adaptive NEMESIS package (`fitcamx.gen5w`). Root IPC uses `HmgapidClient` (`LFD1` over `@hmgapid` with automatic fallback to `@fitcamx.root`). |
 
 ### ⚠️ Strict Operational Invariants
 
@@ -22,7 +22,7 @@ This document is the authoritative engineering guide for AI agents and human dev
 2. **Flash Memory Preservation Invariant:**
    Do **NOT** write automated debug dumps to flash storage on app startup, error callbacks, or exit. Write diagnostics **only** when an external USB flash drive is attached and the user explicitly clicks the **"Export Log"** button.
 3. **No External Codec Dependency Invariant:**
-   Do **NOT** reintroduce `"depends": "media.codecs"` in `mod/mod.json`. Video decoding is performed self-contained inside LibVLC.
+   Do **NOT** reintroduce `"depends": "media.codecs"` in `mod/mod.json` or `nemesis/NEMESIS.data.in`. Video decoding is performed self-contained inside LibVLC.
 4. **Legal & Non-Affiliation Invariant:**
    Maintain clear non-affiliation notices and disclaimers. See [`DISCLAIMER.md`](DISCLAIMER.md) for full legal text. Never claim official affiliation with Hyundai Motor Group or FITCAMX.
 
@@ -48,32 +48,49 @@ fitcamx/
 │       │   ├── ThemeManager.java        # Material Design 3 tonal palette & API 19 shape/state-layer engine
 │       │   ├── CameraClient.java        # Novatek CGI protocol client & state sync engine
 │       │   ├── VlcPlayerManager.java    # Embedded LibVLC player, RTSP stream playback & surface lifecycle
+│       │   ├── OemRearCamPlayer.java    # Gen5W OEM analog backup camera live viewer (@fitcamx.rearcam IPC)
+│       │   ├── UsbDashcamScanner.java   # gen5-RearDashcam USB .ts / Saved / Snapshots gallery indexer
 │       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover state machine
-│       │   ├── UsbDownloader.java       # Atomic (.part + fsync) SD-to-USB HTTP downloader
+│       │   ├── UsbDownloader.java       # Atomic (.part + fsync) SD-to-USB HTTP & local USB clip exporter
 │       │   ├── ScreenshotHelper.java    # USB-only root framebuffer capture & theme-aware BGRA/RGBA normalizer
 │       │   ├── TsHeaderSniffer.java     # MPEG-TS / M2TS & MP4/MOV codec header sniffer
 │       │   ├── XmlListParser.java       # Sanitized XML & fallback regex clip-list parser
-│       │   ├── HmgapidClient.java       # Root daemon IPC client (LFD1 protocol over abstract UNIX socket)
+│       │   ├── HmgapidClient.java       # Root daemon IPC client (@hmgapid primary + @fitcamx.root fallback)
 │       │   ├── DebugLogger.java         # RAM-only diagnostics aggregator & USB exporter
 │       │   └── ClipItem.java            # Video clip & still photo metadata entity
 │       └── main/jniLibs/armeabi-v7a/
 │           ├── libvlc.so                # LibVLC native engine (bundles FFmpeg / libavcodec)
 │           ├── libvlcjni.so             # LibVLC JNI glue layer
 │           └── libc++_shared.so         # LLVM C++ runtime
+├── daemon/
+│   └── src/fitcamx/rearcam/        # Compiled & D8-dexed (min-api 19) into svc/rearcam.jar & bin/rearcam.jar
+│       ├── RearCamDaemon.java      # On-demand uid=1000/root OEM backup camera & /dev/admem reader (@fitcamx.rearcam)
+│       ├── StandaloneRootDaemon.java # Lightweight uid=0 LFD1 broker (@fitcamx.root) for Standalone NEMESIS
+│       ├── StandaloneInstaller.java # App_process installer/updater/migrator/uninstaller for Standalone NEMESIS
+│       ├── CarBridge.java          # Reflective com.hkmc.* CarInfo / CameraManager / Reverse state bridge
+│       ├── PosixBridge.java        # KitKat libcore.io.Libcore.os mmap / system property / UID bridge
+│       ├── PmapParser.java         # /proc/pmap physical-offset parser for rearcam_shared
+│       └── RingWatcher.java        # Passive gen5-RearDashcam coexistence & /dev/admem ring reader
 ├── mod/
-│   ├── mod.json                    # HMG-API mod manifest (version, apps, services, permissions)
+│   ├── mod.json                    # HMG-API mod manifest (version, apps, services, wifi.client, usb)
+│   ├── open.sh                     # Launcher script for both HMG-API tile & NEMESIS Manager [app.0]
 │   ├── svc/
 │   │   ├── reboot.sh               # Root execution script for head unit reboot
 │   │   └── screenshot.sh           # Root execution script for atomic USB-only framebuffer PNG capture
 │   └── icons/                      # 128x128 PNG icons for Gen5W launcher (active + disabled)
+├── nemesis/
+│   ├── NEMESIS.data.in             # Adaptive NEMESIS package metadata (id=fitcamx.gen5w, no hmgapi dependency)
+│   ├── README.txt.in               # Universal USB installer instructions (HMG-API & NEMESIS Manager)
+│   ├── bin/service.sh              # Background root launcher for StandaloneRootDaemon (no-op under HMG-API)
+│   └── scripts/                    # Stock-Gen5W mksh-compliant preinstall / postinstall / preuninstall hooks
 ├── tools/
-│   ├── build_package.py            # Complete build pipeline: aapt -> javac -> R8 -> zipalign -> sign
+│   ├── build_package.py            # Complete build pipeline: aapt -> javac -> D8/R8 -> zipalign -> sign
 │   ├── proguard-rules.pro          # R8 shrinking & API 19 Dalvik compatibility rules
-│   └── sign.py                     # HMG-API ECDSA packaging and signature generator
+│   └── sign.py                     # HMG-API ECDSA signer & universal USB / NEMESIS archive builder
 ├── tests/
-│   ├── run_tests.py                # Automated build, JVM unit test & binary invariant runner
-│   └── FitcamUnitTests.java        # Unit & mock-HTTP integration test suite
-└── dist/                           # Release ZIP artifacts for HMG-API and NEMESIS USB sideloading
+│   ├── run_tests.py                # Automated build, JVM unit test, binary invariant & E2E hook runner
+│   └── FitcamUnitTests.java        # Unit, mock-HTTP & Standalone NEMESIS / LFD1 test suite
+└── dist/                           # Release ZIP artifacts (*-usb.zip, *.hmgapi.zip, *-nemesis-package.zip)
 ```
 
 ---
@@ -209,34 +226,16 @@ The Gen5W head unit has a single physical Wi-Fi chipset. It cannot run in concur
 
 ---
 
-## 6. Root Daemon IPC & Head Unit Reboot (`HmgapidClient.java`)
+## 6. Root Daemon IPC, Adaptive Standalone NEMESIS & Head Unit Reboot (`HmgapidClient.java`)
 
-The HMG-API platform runs a background daemon `hmgapid` as `root`, listening on abstract UNIX domain socket `\0hmgapid` (or `/dev/socket/hmgapid`).
-- All packets adhere to the **`LFD1`** (Line Framing Descriptor 1) protocol:
-  - Header: `LFD1` (4 bytes ASCII)
-  - Message Length: Big-endian 32-bit integer
-  - Payload: UTF-8 command string
-- The daemon's `reboot` command is restricted to system callers (returning error code 13 to third-party mods).
-- To bypass this limitation, we define a privileged mod service in `mod/mod.json`:
-  ```json
-  "services": [
-    {
-      "name": "reboot",
-      "script": "svc/reboot.sh",
-      "user": "root",
-      "start": "manual",
-      "restart": false
-    }
-  ]
-  ```
-  Where `svc/reboot.sh` contains:
-  ```bash
-  #!/system/bin/sh
-  sync
-  sleep 1
-  /system/bin/reboot
-  ```
-- `HmgapidClient.reboot()` sends `service-start reboot` to the daemon, executing the script with root permissions and cleanly rebooting the unit.
+FITCAMX supports **both** HMG-API and standalone NEMESIS installations with full feature parity using a dual-socket **`LFD1`** client (`HmgapidClient`):
+- **Wire Protocol (`LFD1`):** `"LFD1"` (4 bytes ASCII), little-endian `u32 argc`, then `argc` × (`u32 len`, UTF-8 bytes); responses stream `'O'` output frames (`u32 len`, UTF-8 bytes) followed by `'X'` (`u32 len=4`, `u32 exitCode`).
+- **Primary Socket (`@hmgapid`):** Used when HMG-API is installed and manages `fitcamx-gen5w`. Dispatches `service-start rearcam`, `service-start screenshot`, and `service-start reboot`.
+- **Fallback Socket (`@fitcamx.root` — `StandaloneRootDaemon`):** Used automatically whenever `@hmgapid` is absent OR returns non-zero (e.g., if HMG-API was later installed alongside an un-migrated standalone NEMESIS package). `StandaloneRootDaemon` runs at 0% CPU in `LocalServerSocket.accept()`, writes zero bytes to `/data`, verifies kernel `SO_PEERCRED` UID (`0`, `1000`, or `fitcamx.app`), and executes only the fixed allowlist (`rearcam`, `screenshot`, `reboot`, `whoami`, `ping`, and `uid=0`-only `stop`).
+- **Adaptive NEMESIS Installer (`nemesis/scripts/*` + `StandaloneInstaller`):**
+  - `postinstall.sh` checks `[ -x /system/bin/hmgapid ] && [ -f /data/hmgapi/uninstall.sh ]`. When HMG-API is present, it migrates any prior standalone state (`StandaloneInstaller migrate-to-hmgapi` preserving `/data/data/fitcamx.app`) and delegates to `hmgapid engine install` + `apply`.
+  - When HMG-API is absent, `StandaloneInstaller` runs via `/system/bin/app_process` out of `bin/rearcam.jar`: enables Gen5W Wi-Fi client (`/system/etc/permissions/android.hardware.wifi.xml`, `#-/system/etc/permissions/android.hardware.wifi.xml` in `featurexml.cfg`, `persist.wifi.state=3`) with non-destructive backups in `/data/nemesis/backup/fitcamx.gen5w/` (preserving pre-existing Tilepad configs), streams `app/Fitcamx.apk` directly out of `mod/package.zip` to `/data/local/tmp` during `pm install -r` (saving ~18.4 MB of duplicate `/data` storage), and starts `bin/service.sh`.
+- **Stock Gen5W Shell Constraints (`tools/check-scripts.sh`):** All `.sh` scripts in `mod/` and `nemesis/` must pass HMG-API's `ScriptCheck` — stock Gen5W lacks `env`, `unzip`, `sed`, `awk`, `cut`, `tr`, `head`, `tail`, `find`, `xargs`, `printf`, and `su`, and `toolbox sleep` accepts integer seconds only (`sleep 1`).
 
 ---
 
@@ -259,15 +258,18 @@ python3 tests/run_tests.py
 1. **Self-Bootstrapping Cloud Toolchain & Persistent Cache:**
    - Discovers JDK 8/17+ (`JAVA_HOME` or `javac` on `PATH`), automatically downloads & extracts Android `android-19/android.jar` + Build-Tools `30.0.3` (`~/tools/android-sdk`), and shallow-clones `VysseCodes/HMG-API` (`~/tools/HMG-API`).
    - In Antigravity Cloud VMs, archives are cached in persistent `~/.gemini/fitcamx-gen5w/cache/` so new cloud sessions restore the entire SDK + HMG-API toolchain in ~1 second without re-downloading.
-2. **Bytecode Compilation & Dalvik R8 Shrinking:**
-   - Compiles Java source files with `javac --release 8` against `android-19/android.jar` and `libvlc.jar`.
-   - Shrinks and converts bytecode with `R8 --min-api 19` (`tools/proguard-rules.pro`) into Dalvik `classes.dex` (`dex 035`), stripping post-KitKat classes (`AudioDeviceCallback`, `androidx.lifecycle.Observer`, unused UI widgets).
+2. **Bytecode Compilation & Dalvik D8/R8 Shrinking:**
+   - Compiles app and daemon Java source files with `javac --release 8` against `android-19/android.jar` and `libvlc.jar`.
+   - Builds `svc/rearcam.jar` via `D8 --min-api 19` and shrinks app bytecode with `R8 --min-api 19` (`tools/proguard-rules.pro`) into Dalvik `classes.dex` (`dex 035`), stripping post-KitKat classes (`AudioDeviceCallback`, `androidx.lifecycle.Observer`, unused UI widgets).
 3. **Deflated Native Packaging & KitKat v1 Signing:**
    - Injects `classes.dex` and `armeabi-v7a` native libraries (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`) into `unsigned.apk` with `ZIP_DEFLATED`, then runs `zipalign -f 4`.
    - Resolves signing keys in priority order: CI Secrets (`FITCAMX_KEYSTORE_BASE64` + `FITCAMX_AUTHOR_KEY`) → persistent cloud keys (`~/.gemini/fitcamx-gen5w/keys/`) → local `../build/keys/` → automatic ephemeral dev keys (`~/.cache/fitcamx-dev-keys`, unless `--require-release-keys` is set).
    - Signs `Fitcamx.apk` with `apksigner` strictly using Android v1 JAR signature (`--v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false`).
-4. **HMG-API & NEMESIS Packaging (`dist/`, untracked in git):**
-   - Stages `mod/`, invokes `sign.py` with ECDSA SHA256 author keys, and outputs all 4 packages in `dist/` (`*.hmgapi.zip`, `*-hmgapi-usb.zip`, `*-nemesis-usb.zip`, `*-nemesis-package.zip`).
+4. **Universal USB, HMG-API & Adaptive NEMESIS Packaging (`dist/`, untracked in git):**
+   - Stages `mod/` and `nemesis/`, invokes `sign.py` with ECDSA SHA256 author keys, and outputs all 3 release archives in `dist/`:
+     - `fitcamx-gen5w-vX.Y.Z-usb.zip` — **Single universal USB archive** containing both `HMGAPI/updates/fitcamx-gen5w-vX.Y.Z.zip` and `NEMESIS.data` + `packages/fitcamx.gen5w.zip` + `README.txt`.
+     - `fitcamx-gen5w-vX.Y.Z.hmgapi.zip` — Standalone signed HMG-API mod package.
+     - `fitcamx-gen5w-vX.Y.Z-nemesis-package.zip` — Standalone adaptive NEMESIS package (`fitcamx.gen5w`).
 5. **Cloud Key Management, Google Drive Export & GitHub Actions:**
    - Check or import production keys (`uuid: 7abe7eda-b784-851a-bb6e-91cb0294bdf1`):
      ```bash
@@ -278,7 +280,7 @@ python3 tests/run_tests.py
      ```bash
      ./build.sh --sync-gdrive
      ```
-   - CI & Releases: `.github/workflows/ci.yml` verifies every push/PR and uploads build artifacts; `.github/workflows/release.yml` enforces `--require-release-keys` on `v*.*.*` tags and publishes all 4 signed ZIPs + `SHA256SUMS.txt` to GitHub Releases.
+   - CI & Releases: `.github/workflows/ci.yml` verifies every push/PR (including `tools/check-scripts.sh` and Step 6 E2E Standalone/HMG-API/Migration hook simulations) and uploads build artifacts; `.github/workflows/release.yml` enforces `--require-release-keys` on `v*.*.*` tags and publishes all 3 signed ZIPs + `SHA256SUMS.txt` to GitHub Releases.
 
 ---
 

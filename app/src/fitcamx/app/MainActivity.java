@@ -256,6 +256,8 @@ public class MainActivity extends Activity {
                 stockCamReceiverRegistered = true;
             } catch (Throwable ignored) {}
 
+            HmgapidClient.probeRootServiceAsync();
+
             // Silently probe Gen5W OEM analog backup camera support (hidden on SVM / unsupported trims)
             oemRearCameraClient.probeSupportAsync(new OemRearCameraClient.ProbeCallback() {
                 @Override
@@ -3950,19 +3952,29 @@ public class MainActivity extends Activity {
     private void showExitDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("Exit FITCAMX");
-        builder.setMessage("Select an exit option:\n\n[Exit & Reboot]\nRestores Wi-Fi and reboots the head unit.\n\n[Exit]\nRestores Wi-Fi and returns to head unit menus.");
-        builder.setPositiveButton("Exit & Reboot", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                exitWithReboot();
-            }
-        });
-        builder.setNeutralButton("Exit", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                exitAndRestoreProjection();
-            }
-        });
+        if (HmgapidClient.isRootServiceCachedAvailable()) {
+            builder.setMessage("Select an exit option:\n\n[Exit & Reboot]\nRestores Wi-Fi and reboots the head unit.\n\n[Exit]\nRestores Wi-Fi and returns to head unit menus.");
+            builder.setPositiveButton("Exit & Reboot", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    exitWithReboot();
+                }
+            });
+            builder.setNeutralButton("Exit", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    exitAndRestoreProjection();
+                }
+            });
+        } else {
+            builder.setMessage("Restore previous Wi-Fi state and return to head unit menus?");
+            builder.setPositiveButton("Exit", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    exitAndRestoreProjection();
+                }
+            });
+        }
         builder.setNegativeButton("Cancel", null);
         builder.show();
     }
@@ -3990,6 +4002,9 @@ public class MainActivity extends Activity {
         isActivityVisible = true;
         lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
         if (isExiting) return;
+        if (!HmgapidClient.isRootServiceCachedAvailable()) {
+            HmgapidClient.probeRootServiceAsync();
+        }
 
         boolean liveVisible = (layoutLiveMode != null && layoutLiveMode.getVisibility() == View.VISIBLE);
         if (suspendedInBackground) {

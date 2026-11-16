@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Sign a staged mod folder and zip it as an HMG-API package, on the Mac (the key never goes to the car).
+"""Sign a staged mod folder and build the universal USB installer, HMG-API mod zip, and NEMESIS package.
 
-    tools/sign.py <mod dir> <dist dir> <key> <hmg-api checkout>
-        writes <id>-v<version>.hmgapi.zip and, for a flash drive, <id>-v<version>-hmgapi-usb.zip
-        (HMGAPI/updates/<id>-v<version>.zip inside) and <id>-v<version>-nemesis-usb.zip, and for the
-        NEMESIS Package Store <id>-v<version>-nemesis-package.zip (both made by the checkout's
-        tools/mknemesismod.sh, needs unzip and zip)
+    tools/sign.py <mod dir> <dist dir> <key> [hmg-api checkout]
 
-Same files and manifest as `hmgapi.engine.Signing sign`: SHA256withECDSA over
-META-HMGAPI/manifest.json, the uuid derived from the public key. Needs openssl.
+Outputs in <dist dir>:
+  1. <id>-v<version>-usb.zip              Single universal USB installer (works with HMG-API AND standalone NEMESIS)
+  2. <id>-v<version>.hmgapi.zip           Signed HMG-API mod package (ECDSA SHA-256 over META-HMGAPI/manifest.json)
+  3. <id>-v<version>-nemesis-package.zip  Adaptive NEMESIS package (id=fitcamx.gen5w, auto-detects HMG-API vs standalone)
 """
-import base64, hashlib, json, os, shutil, subprocess, sys, tempfile, zipfile
+import base64
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
 
-# what NEMESIS's store shows as compatible: only what the mod was tested on. A glob of
-# ro.build.product, and the unit's /system/onebin folder name.
-TESTED_OS = "CVEV.USA.*.*,NEEV.USA.*.*,NEEV23.USA.*.*,NEEV23SE.USA.*.*,CEEV.USA.*.*"
-TESTED_MODELS = "cvev_us,neev_us,neev23_us,neev23se_us,ceev_us"
-
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+NEMESIS_TPL_DIR = os.path.join(REPO_ROOT, "nemesis")
+NEMESIS_PACKAGE_ID = "fitcamx.gen5w"
 META = "META-HMGAPI"
 
 
@@ -49,117 +54,120 @@ def files_of(root):
     return sorted(out)
 
 
-def swap_in_zip(path, name, change):
-    """Rewrite one member of a zip, keeping the others and every member's attributes."""
-    with zipfile.ZipFile(path) as z:
-        items = [(i, z.read(i)) for i in z.infolist()]
-    with zipfile.ZipFile(path, "w") as z:
-        for i, d in items:
-            z.writestr(i, change(d) if i.filename == name else d)
+def nemesis_package_version(ver: str) -> str:
+    """Convert semver to NEMESIS dotted numeric package-version (matching HMG-API tools/nemesis-version.py)."""
+    if re.fullmatch(r"[0-9]+(\.[0-9]+)*", ver):
+        return ver
+    m = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)-(alpha|beta|rc)\.(0|[1-9][0-9]*)", ver)
+    if not m:
+        sys.exit(f"Unsupported version format for NEMESIS package-version: {ver}")
+    x, y, z = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    tag = {"alpha": "97", "beta": "98", "rc": "99"}[m.group(4)]
+    n = m.group(5)
+    if z > 0:
+        return f"{x}.{y}.{z - 1}.{tag}.{n}"
+    if y > 0:
+        return f"{x}.{y - 1}.{tag}.{n}"
+    if x > 0:
+        return f"{x - 1}.{tag}.{n}"
+    sys.exit(f"Cannot compute pre-release NEMESIS package-version before 0.0.0: {ver}")
 
 
-def tested_on(descriptor):
-    """The tool writes os and models as "any"; a mod with a "system" would need this changed."""
-    for k, v in (("os", TESTED_OS), ("models", TESTED_MODELS)):
-        any_ = f'{k}="any"'.encode()
-        if descriptor.count(any_) != 1:
-            sys.exit(f"NEMESIS.data has no {k}=\"any\" to replace")
-        descriptor = descriptor.replace(any_, f'{k}="{v}"'.encode())
-    return descriptor
+def _clean_text(s: str, max_len: int) -> str:
+    cleaned = " ".join(str(s).replace('"', "'").split())
+    return cleaned if len(cleaned) <= max_len else cleaned[: max_len - 3].rstrip() + "..."
 
 
-def nemesis_usb_py(signed, mod, mod_dir, hmgapi, dist):
-    """Pure-Python equivalent of HMG-API's tools/mknemesismod.sh when sh/zip are unavailable (e.g. Windows)."""
-    import re
-    hmgapi = os.path.abspath(hmgapi)
-    mid, ver = mod["id"], mod["version"]
-    pkg = "hmgapi." + mid
-    def text(s, n):
-        s = " ".join(str(s).replace('"', "'").split())
-        return s if len(s) <= n else s[:n - 3].rstrip() + "..."
-    name = text(mod.get("name") or mid, 64)
-    short = text("HMG-API mod: " + name, 64)
-    raw_desc = mod.get("description", "")
-    detail = text(f"{name} {ver}, a HMG-API mod (needs HMG-API). {raw_desc}", 256)
-    pv = subprocess.run([sys.executable, os.path.join(hmgapi, "tools", "nemesis-version.py"), ver],
-                        cwd=hmgapi, capture_output=True, text=True, check=True).stdout.strip()
-    extra_deps = mod.get("depends", "")
-    if isinstance(extra_deps, list):
-        extra_deps = ",".join(extra_deps)
-    needs = "hmgapi@>=1.0" + (("," + extra_deps) if extra_deps else "")
-    mod_json_path = os.path.join(os.path.abspath(mod_dir), "mod.json")
-    dep = subprocess.run(
-        [sys.executable, os.path.join(hmgapi, "tools", "nemesis-meta.py"), "depends", pkg, needs, "--mod", mod_json_path],
-        cwd=hmgapi, capture_output=True, text=True, check=True
-    ).stdout.strip()
+def _add_zip_entry(z: zipfile.ZipFile, arcname: str, data: bytes, exec_bit: bool = False, stored: bool = False):
+    zi = zipfile.ZipInfo(arcname, (2026, 1, 1, 0, 0, 0))
+    zi.create_system = 3  # Unix permissions
+    zi.compress_type = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+    zi.external_attr = (0o100755 if exec_bit else 0o100644) << 16
+    z.writestr(zi, data)
+
+
+def _read_lf_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read().replace(b"\r\n", b"\n")
+
+
+def build_adaptive_packages(signed_hmgapi_zip: str, mod: dict, mod_dir: str, dist: str):
+    """Build the adaptive NEMESIS package and the single universal USB zip."""
+    mid = mod["id"]
+    ver = mod["version"]
+    pkg_id = NEMESIS_PACKAGE_ID
+    pv = nemesis_package_version(ver)
+
+    name = _clean_text(mod.get("name") or mid, 64)
+    short_desc = _clean_text("FITCAMX dashcam & backup camera viewer (HMG-API or NEMESIS)", 64)
+    detail_desc = _clean_text(
+        f"{name} {ver}: live RTSP stream, OEM car backup camera integration, SD/USB gallery & export. "
+        f"Installs automatically through HMG-API when present, or standalone on NEMESIS.",
+        256,
+    )
+
     repl = {
-        "ID": mid, "VERSION": ver, "PACKAGE_ID": pkg, "PACKAGE_VERSION": pv,
-        "NAME": name, "SHORT_DESC": short, "DETAILED_DESC": detail, "OS": "any", "DEPENDS": dep,
+        "ID": mid,
+        "VERSION": ver,
+        "PACKAGE_ID": pkg_id,
+        "PACKAGE_VERSION": pv,
+        "NAME": name,
+        "SHORT_DESC": short_desc,
+        "DETAILED_DESC": detail_desc,
     }
-    def fill(tpl_rel):
-        t = open(os.path.join(hmgapi, tpl_rel), encoding="utf-8").read()
+
+    def fill_tpl(filename: str) -> bytes:
+        txt = open(os.path.join(NEMESIS_TPL_DIR, filename), "r", encoding="utf-8").read()
         for k, v in repl.items():
-            t = t.replace(f"@{k}@", v)
-        return t.encode("utf-8")
+            txt = txt.replace(f"@{k}@", v)
+        return txt.replace("\r\n", "\n").encode("utf-8")
 
-    def add_entry(z, arcname, data, exec_bit=False):
-        zi = zipfile.ZipInfo(arcname, (2026, 1, 1, 0, 0, 0))
-        zi.compress_type = zipfile.ZIP_DEFLATED
-        zi.external_attr = (0o755 if exec_bit else 0o644) << 16
-        z.writestr(zi, data)
+    open_sh_path = os.path.join(mod_dir, "open.sh")
+    service_sh_path = os.path.join(NEMESIS_TPL_DIR, "bin", "service.sh")
+    rearcam_jar_path = os.path.join(mod_dir, "svc", "rearcam.jar")
+    if not os.path.isfile(rearcam_jar_path):
+        sys.exit(f"Missing required {rearcam_jar_path} for adaptive NEMESIS package")
 
-    open_sh = os.path.join(mod_dir, "open.sh")
-    if not os.path.isfile(open_sh):
-        open_sh = os.path.join(hmgapi, "install/nemesis/bin/open.sh")
-    store = os.path.join(dist, f"{mid}-v{ver}-nemesis-package.zip")
-    out = os.path.join(dist, f"{mid}-v{ver}-nemesis-usb.zip")
-    pkg_entries = {
-        "NEMESIS.data": (tested_on(fill("install/nemesis/mod/NEMESIS.data.in")), False),
-        "bin/open.sh": (open(open_sh, "rb").read(), True),
-        "mod/id": ((mid + "\n").encode("utf-8"), False),
-        "mod/package.zip": (open(signed, "rb").read(), False),
-    }
-    scripts_dir = os.path.join(hmgapi, "install/nemesis/mod/scripts")
+    signed_bytes = open(signed_hmgapi_zip, "rb").read()
+    rearcam_bytes = open(rearcam_jar_path, "rb").read()
+
+    # 1. Adaptive NEMESIS package (<id>-v<ver>-nemesis-package.zip)
+    nemesis_pkg_path = os.path.join(dist, f"{mid}-v{ver}-nemesis-package.zip")
+    pkg_entries = [
+        ("NEMESIS.data", fill_tpl("NEMESIS.data.in"), False, False),
+        ("bin/open.sh", _read_lf_bytes(open_sh_path), True, False),
+        ("bin/rearcam.jar", rearcam_bytes, False, True),
+        ("bin/service.sh", _read_lf_bytes(service_sh_path), True, False),
+        ("mod/id", (mid + "\n").encode("utf-8"), False, False),
+        ("mod/package.zip", signed_bytes, False, True),
+    ]
+    scripts_dir = os.path.join(NEMESIS_TPL_DIR, "scripts")
     for fn in sorted(os.listdir(scripts_dir)):
-        p = os.path.join(scripts_dir, fn)
-        if os.path.isfile(p):
-            pkg_entries[f"scripts/{fn}"] = (open(p, "rb").read(), fn.endswith(".sh"))
-    with zipfile.ZipFile(store, "w", zipfile.ZIP_DEFLATED) as z:
-        for k in sorted(pkg_entries):
-            add_entry(z, k, *pkg_entries[k])
+        fp = os.path.join(scripts_dir, fn)
+        if os.path.isfile(fp):
+            pkg_entries.append((f"scripts/{fn}", _read_lf_bytes(fp), fn.endswith(".sh"), False))
 
-    packed = open(store, "rb").read()
-    stick_entries = {
-        "NEMESIS.data": (f"[nemesis]\nversion=1.1\ntype=install\npath=packages/{pkg}.zip\n".encode("utf-8"), False),
-        "README.txt": (fill("install/nemesis/mod/README.txt"), False),
-        f"packages/{pkg}.zip": (packed, False),
-    }
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for k in sorted(stick_entries):
-            add_entry(z, k, *stick_entries[k])
-    return out, store
+    with zipfile.ZipFile(nemesis_pkg_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for arcname, data, exec_bit, stored in sorted(pkg_entries, key=lambda x: x[0]):
+            _add_zip_entry(z, arcname, data, exec_bit=exec_bit, stored=stored)
 
+    # 2. Single Universal USB Installer (<id>-v<ver>-usb.zip)
+    #    - HMGAPI/updates/<id>-v<ver>.zip  (scanned by HMG-API app -> Updates)
+    #    - NEMESIS.data + packages/fitcamx.gen5w.zip + README.txt  (scanned by NEMESIS Manager USB install)
+    nemesis_pkg_bytes = open(nemesis_pkg_path, "rb").read()
+    universal_usb_path = os.path.join(dist, f"{mid}-v{ver}-usb.zip")
+    usb_descriptor = f"[nemesis]\nversion=1.1\ntype=install\npath=packages/{pkg_id}.zip\n".encode("utf-8")
+    usb_entries = [
+        (f"HMGAPI/updates/{mid}-v{ver}.zip", signed_bytes, False, True),
+        ("NEMESIS.data", usb_descriptor, False, False),
+        ("README.txt", fill_tpl("README.txt.in"), False, False),
+        (f"packages/{pkg_id}.zip", nemesis_pkg_bytes, False, True),
+    ]
+    with zipfile.ZipFile(universal_usb_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for arcname, data, exec_bit, stored in usb_entries:
+            _add_zip_entry(z, arcname, data, exec_bit=exec_bit, stored=stored)
 
-def nemesis_usb(signed, mod, mod_dir, hmgapi, dist):
-    """HMG-API's own tool wraps the signed zip; it names the results <id>-<version>-nemesis[-package].zip."""
-    if not shutil.which("sh") or not shutil.which("zip") or not shutil.which("unzip"):
-        return nemesis_usb_py(signed, mod, mod_dir, hmgapi, dist)
-    tool = os.path.join(os.path.abspath(hmgapi), "tools", "mknemesismod.sh")
-    with tempfile.TemporaryDirectory() as t:
-        subprocess.run(["sh", tool, os.path.abspath(signed), t], check=True, capture_output=True)
-        out = os.path.join(dist, f"{mod['id']}-v{mod['version']}-nemesis-usb.zip")
-        store = os.path.join(dist, f"{mod['id']}-v{mod['version']}-nemesis-package.zip")
-        shutil.move(os.path.join(t, f"{mod['id']}-{mod['version']}-nemesis.zip"), out)
-        shutil.move(os.path.join(t, f"{mod['id']}-{mod['version']}-nemesis-package.zip"), store)
-    swap_in_zip(store, "NEMESIS.data", tested_on)
-    open_sh = os.path.join(mod_dir, "open.sh")
-    if os.path.isfile(open_sh):
-        open_bytes = open(open_sh, "rb").read()
-        swap_in_zip(store, "bin/open.sh", lambda _: open_bytes)
-    packed = open(store, "rb").read()
-    swap_in_zip(out, f"packages/hmgapi.{mod['id']}.zip", lambda _: packed)
-    swap_in_zip(out, "NEMESIS.data", lambda d: d.replace(b"version=1.0", b"version=1.1"))
-    return out, store
+    return universal_usb_path, nemesis_pkg_path
 
 
 def sign_manifest(key, pub, manifest):
@@ -185,12 +193,12 @@ def sign_manifest(key, pub, manifest):
     return sig
 
 
-def build(mod_dir, dist, key, hmgapi):
+def build(mod_dir, dist, key, hmgapi=None):
     pub_path = key + ".pub"
     if not os.path.isfile(pub_path):
         sys.exit(f"no {pub_path}")
     pub = der_of(pub_path)
-    mod = json.load(open(os.path.join(mod_dir, "mod.json")))
+    mod = json.load(open(os.path.join(mod_dir, "mod.json"), encoding="utf-8"))
     files = {n: hashlib.sha256(open(os.path.join(mod_dir, n), "rb").read()).hexdigest() for n in files_of(mod_dir)}
     manifest = json.dumps({
         "format": 1, "id": mod["id"], "version": mod["version"],
@@ -200,28 +208,23 @@ def build(mod_dir, dist, key, hmgapi):
     sig = sign_manifest(key, pub, manifest)
 
     os.makedirs(dist, exist_ok=True)
-    out = os.path.join(dist, f"{mod['id']}-v{mod['version']}.hmgapi.zip")
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(f"{META}/manifest.json", manifest)
-        z.writestr(f"{META}/signature", base64.b64encode(sig).decode() + "\n")
+    hmgapi_out = os.path.join(dist, f"{mod['id']}-v{mod['version']}.hmgapi.zip")
+    with zipfile.ZipFile(hmgapi_out, "w", zipfile.ZIP_DEFLATED) as z:
+        _add_zip_entry(z, f"{META}/manifest.json", manifest, exec_bit=False)
+        _add_zip_entry(z, f"{META}/signature", (base64.b64encode(sig).decode() + "\n").encode("utf-8"), exec_bit=False)
         for n in files:
-            info = zipfile.ZipInfo.from_file(os.path.join(mod_dir, n), n)
-            if n.endswith(".sh"):
-                info.external_attr = 0o755 << 16
-            z.writestr(info, open(os.path.join(mod_dir, n), "rb").read(), zipfile.ZIP_DEFLATED)
-    usb = os.path.join(dist, f"{mod['id']}-v{mod['version']}-hmgapi-usb.zip")
-    with zipfile.ZipFile(usb, "w", zipfile.ZIP_STORED) as z:
-        z.write(out, f"HMGAPI/updates/{mod['id']}-v{mod['version']}.zip")
+            src_p = os.path.join(mod_dir, n)
+            raw = _read_lf_bytes(src_p) if n.endswith(".sh") else open(src_p, "rb").read()
+            _add_zip_entry(z, n, raw, exec_bit=n.endswith(".sh"), stored=n.endswith((".apk", ".jar")))
+
+    universal_usb, nemesis_pkg = build_adaptive_packages(hmgapi_out, mod, mod_dir, dist)
     print(f"signed {mod['id']} {mod['version']}: {len(files)} files, uuid {uuid_of(pub)}")
-    print(out)
-    print(usb)
-    if os.path.isdir(hmgapi):
-        print(*nemesis_usb(out, mod, mod_dir, hmgapi, dist), sep="\n")
-    else:
-        print(f"HMG-API checkout not found at {hmgapi} (NEMESIS packaging skipped)")
+    print(universal_usb)
+    print(hmgapi_out)
+    print(nemesis_pkg)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 5:
+    if len(sys.argv) not in (4, 5):
         sys.exit(__doc__)
     build(*sys.argv[1:])

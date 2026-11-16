@@ -1,0 +1,25 @@
+@NAME@ @VERSION@ — Universal USB Installer (HMG-API & Standalone NEMESIS)
+=========================================================================
+
+Unzip this archive onto the top level (root) of a FAT32 or exFAT USB stick so both
+"HMGAPI/", "packages/", and "NEMESIS.data" sit at the root of the stick.
+
+Option 1 — Install via HMG-API (recommended when HMG-API is installed):
+  1. Plug the USB stick into the car's data USB port.
+  2. Open the HMG-API app -> Updates -> Check USB updates.
+  3. Install "@NAME@ @VERSION@" and tap Apply changes.
+
+Option 2 — Install via NEMESIS Manager (works WITH or WITHOUT HMG-API):
+  1. Plug the USB stick into the car's data USB port.
+  2. Open NEMESIS Manager and approve the USB package install prompt
+     (or run: nemesis install /storage/usb0/packages/@PACKAGE_ID@.zip).
+  3. The installer automatically detects whether HMG-API is installed:
+     - With HMG-API: registers the mod in HMG-API with native Gen5W home-screen tile.
+     - Without HMG-API: installs standalone on NEMESIS (enables Wi-Fi client with safe
+       /system backups, installs the FITCAMX app for Tilepad / 3rd-party launchers, and
+       provides OEM backup camera, USB screenshots, and head-unit reboot support).
+  4. If this is the first time Wi-Fi client was enabled on the head unit, restart the
+     head unit once after installation.
+
+To uninstall from a root shell:
+  nemesis uninstall @PACKAGE_ID@

@@ -6,12 +6,19 @@ import com.sun.net.httpserver.HttpServer;
 import fitcamx.app.*;
 import fitcamx.rearcam.CarBridge;
 import fitcamx.rearcam.PmapParser;
+import fitcamx.rearcam.PosixBridge;
 import fitcamx.rearcam.RearCamDaemon;
+import fitcamx.rearcam.StandaloneInstaller;
+import fitcamx.rearcam.StandaloneRootDaemon;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -1292,6 +1299,188 @@ public class FitcamUnitTests {
         }
     }
 
+    private static void testStandaloneNemesisAndRootDaemon() throws Exception {
+        System.out.println("\n--- 17. Adaptive Standalone NEMESIS Installer & @fitcamx.root LFD1 Daemon ---");
+
+        // 1. LFD1 wire protocol round-trip between HmgapidClient and StandaloneRootDaemon
+        byte[] encodedReq = HmgapidClient.encodeRequest("service-start", "rearcam");
+        String[] decodedArgs = StandaloneRootDaemon.decodeRequest(new ByteArrayInputStream(encodedReq));
+        ByteArrayOutputStream respBuf = new ByteArrayOutputStream();
+        StandaloneRootDaemon.writeResponse(respBuf, "started\n", 0);
+        StringBuilder capturedOut = new StringBuilder();
+        int parsedRc = HmgapidClient.readResponse(
+                new ByteArrayInputStream(respBuf.toByteArray()), null, capturedOut);
+        check("LFD1 request/response wire framing round-trips identically between HmgapidClient and StandaloneRootDaemon",
+              decodedArgs != null
+              && Arrays.equals(new String[] { "service-start", "rearcam" }, decodedArgs)
+              && parsedRc == 0
+              && "started\n".equals(capturedOut.toString())
+              && StandaloneRootDaemon.decodeRequest(new ByteArrayInputStream(new byte[0])) == null);
+
+        // 2. StandaloneRootDaemon UID authorization & fixed service allowlist
+        final List<String> startedServices = new ArrayList<String>();
+        final AtomicBoolean rebootTriggered = new AtomicBoolean(false);
+        final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
+        StandaloneRootDaemon.ServiceLauncher mockLauncher = new StandaloneRootDaemon.ServiceLauncher() {
+            @Override
+            public int startService(String serviceName, StringBuilder output) {
+                startedServices.add(serviceName);
+                output.append("ok:").append(serviceName).append('\n');
+                return 0;
+            }
+
+            @Override
+            public int triggerReboot(StringBuilder output) {
+                rebootTriggered.set(true);
+                output.append("restarting\n");
+                return 0;
+            }
+
+            @Override
+            public void requestShutdown() {
+                shutdownRequested.set(true);
+            }
+        };
+
+        int appUid = 10188;
+        int unauthUid = 10999;
+        StringBuilder msg = new StringBuilder();
+        int rcPingUnauth = StandaloneRootDaemon.dispatchCommand(new String[] { "ping" }, unauthUid, appUid, mockLauncher, msg);
+        int rcWhoamiUnauth = StandaloneRootDaemon.dispatchCommand(new String[] { "whoami" }, unauthUid, appUid, mockLauncher, new StringBuilder());
+        int rcSvcUnauth = StandaloneRootDaemon.dispatchCommand(new String[] { "service-start", "rearcam" }, unauthUid, appUid, mockLauncher, new StringBuilder());
+        StringBuilder whoamiOut = new StringBuilder();
+        int rcWhoamiApp = StandaloneRootDaemon.dispatchCommand(new String[] { "whoami" }, appUid, appUid, mockLauncher, whoamiOut);
+        int rcRearcamApp = StandaloneRootDaemon.dispatchCommand(new String[] { "service-start", "rearcam" }, appUid, appUid, mockLauncher, new StringBuilder());
+        int rcShotApp = StandaloneRootDaemon.dispatchCommand(new String[] { "service-restart", "screenshot" }, appUid, appUid, mockLauncher, new StringBuilder());
+        int rcBadSvc = StandaloneRootDaemon.dispatchCommand(new String[] { "service-start", "arbitrary" }, appUid, appUid, mockLauncher, new StringBuilder());
+        int rcStopApp = StandaloneRootDaemon.dispatchCommand(new String[] { "stop" }, appUid, appUid, mockLauncher, new StringBuilder());
+        boolean shutAfterAppStop = shutdownRequested.get();
+        int rcRebootApp = StandaloneRootDaemon.dispatchCommand(new String[] { "reboot" }, appUid, appUid, mockLauncher, new StringBuilder());
+        int rcStopRoot = StandaloneRootDaemon.dispatchCommand(new String[] { "stop" }, 0, appUid, mockLauncher, new StringBuilder());
+
+        check("StandaloneRootDaemon enforces peer UID authorization, blocks unknown ops/services, and restricts stop to uid=0",
+              rcPingUnauth == 0
+              && rcWhoamiUnauth == 13
+              && rcSvcUnauth == 13
+              && rcWhoamiApp == 0 && "fitcamx-gen5w\n".equals(whoamiOut.toString())
+              && rcRearcamApp == 0 && rcShotApp == 0
+              && Arrays.equals(new String[] { "rearcam", "screenshot" }, startedServices.toArray(new String[0]))
+              && rcBadSvc == 2
+              && rcStopApp == 13 && !shutAfterAppStop
+              && rcRebootApp == 0 && rebootTriggered.get()
+              && rcStopRoot == 0 && shutdownRequested.get());
+
+        // 3. featurexml.cfg line commenting & uncommenting
+        String stockCfg = "-/system/etc/permissions/com.hkmc.foo.xml\n-/system/etc/permissions/android.hardware.wifi.xml\n";
+        String commentedCfg = StandaloneInstaller.commentOutWifiFeatureLine(stockCfg);
+        String alreadyCommented = StandaloneInstaller.commentOutWifiFeatureLine(commentedCfg);
+        String restoredCfg = StandaloneInstaller.uncommentWifiFeatureLine(commentedCfg);
+        check("StandaloneInstaller comments & uncomments android.hardware.wifi.xml in featurexml.cfg byte-for-byte",
+              commentedCfg != null
+              && commentedCfg.contains("#-/system/etc/permissions/android.hardware.wifi.xml\n")
+              && alreadyCommented == null
+              && stockCfg.equals(restoredCfg));
+
+        // 4. Full StandaloneInstaller lifecycle (Stock install -> Update -> Uninstall + Tilepad coexistence + HMG-API migration)
+        File tempRoot = Files.createTempDirectory("fitcam_standalone_").toFile();
+        try {
+            // Create synthetic signed mod zip with Fitcamx.apk + svc scripts
+            File modZip = new File(tempRoot, "package.zip");
+            ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(modZip));
+            zos.putNextEntry(new ZipEntry("app/Fitcamx.apk"));
+            zos.write("FAKE_APK_PAYLOAD_V110".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("svc/screenshot.sh"));
+            zos.write("#!/system/bin/sh\nexit 0\n".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("svc/reboot.sh"));
+            zos.write("#!/system/bin/sh\n/system/bin/reboot\n".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.close();
+
+            // 4a. Stock Gen5W unit (no android.hardware.wifi.xml, uncommented featurexml.cfg, persist.wifi.state=1)
+            File fakeSysRoot = new File(tempRoot, "unit_stock");
+            StandaloneInstaller.Env envStock = new StandaloneInstaller.Env(fakeSysRoot.getAbsolutePath(), true);
+            File cfgFile = envStock.sysFile("/system/onebin/neev_us/featurexml.cfg");
+            cfgFile.getParentFile().mkdirs();
+            Files.write(cfgFile.toPath(), stockCfg.getBytes(StandardCharsets.UTF_8));
+            envStock.sysFile("/system/etc/permissions").mkdirs();
+            envStock.setprop("ro.mobis.onebindir", "neev_us");
+            envStock.setprop("persist.wifi.state", "1");
+            envStock.setprop("sys.boot_completed", "0"); // Test deferred APK install during early boot first!
+
+            File pkgDir = envStock.sysFile("/data/nemesis/apps/fitcamx.gen5w");
+            pkgDir.mkdirs();
+            Files.copy(modZip.toPath(), new File(pkgDir, "mod_tmp.zip").toPath());
+            new File(pkgDir, "mod").mkdirs();
+            new File(pkgDir, "mod_tmp.zip").renameTo(new File(pkgDir, "mod/package.zip"));
+
+            boolean restart1 = StandaloneInstaller.installStandalone(envStock, pkgDir, new File(pkgDir, "mod/package.zip"));
+            boolean wifiXmlCreated = envStock.sysFile(StandaloneInstaller.WIFI_XML_REL).isFile();
+            boolean pendingWhileDown = new File(pkgDir, "standalone/apk.pending").isFile()
+                    && !envStock.isPackageInstalled("fitcamx.app");
+
+            // Boot completes -> ensureAppInstalled installs APK and clears apk.pending
+            envStock.setprop("sys.boot_completed", "1");
+            StandaloneInstaller.ensureAppInstalled(envStock, pkgDir);
+            boolean installedAfterBoot = envStock.isPackageInstalled("fitcamx.app")
+                    && !new File(pkgDir, "standalone/apk.pending").isFile();
+
+            // Idempotent update keeps backups intact and requires no second restart
+            boolean restart2 = StandaloneInstaller.installStandalone(envStock, pkgDir, new File(pkgDir, "mod/package.zip"));
+
+            // Migrate-to-HMG-API preserves /data/data/fitcamx.app user preferences while restoring /system backups
+            File userPref = envStock.sysFile("/data/data/fitcamx.app/shared_prefs/fitcamx.xml");
+            userPref.getParentFile().mkdirs();
+            Files.write(userPref.toPath(), "<map/>".getBytes(StandardCharsets.UTF_8));
+            StandaloneInstaller.uninstallStandalone(envStock, pkgDir, true);
+            boolean migratedCleanly = !envStock.sysFile(StandaloneInstaller.WIFI_XML_REL).exists()
+                    && stockCfg.equals(new String(Files.readAllBytes(cfgFile.toPath()), StandardCharsets.UTF_8))
+                    && "1".equals(envStock.getprop("persist.wifi.state"))
+                    && !envStock.backupDir().exists()
+                    && !envStock.isPackageInstalled("fitcamx.app")
+                    && userPref.isFile();
+
+            // Reinstall & full uninstall removes app data too
+            StandaloneInstaller.installStandalone(envStock, pkgDir, new File(pkgDir, "mod/package.zip"));
+            StandaloneInstaller.uninstallStandalone(envStock, pkgDir, false);
+            boolean fullUninstallClean = !envStock.sysFile(StandaloneInstaller.WIFI_XML_REL).exists()
+                    && stockCfg.equals(new String(Files.readAllBytes(cfgFile.toPath()), StandardCharsets.UTF_8))
+                    && "1".equals(envStock.getprop("persist.wifi.state"))
+                    && !userPref.exists();
+
+            check("StandaloneInstaller enables Wi-Fi, handles early-boot deferred APK install, migrates cleanly to HMG-API, and restores stock /system byte-for-byte",
+                  restart1 && wifiXmlCreated && pendingWhileDown && installedAfterBoot
+                  && !restart2 && migratedCleanly && fullUninstallClean);
+
+            // 4b. Pre-existing Tilepad unit (android.hardware.wifi.xml already present, featurexml.cfg already commented, persist.wifi.state=3)
+            File tilepadRoot = new File(tempRoot, "unit_tilepad");
+            StandaloneInstaller.Env envTile = new StandaloneInstaller.Env(tilepadRoot.getAbsolutePath(), true);
+            File tileWifiXml = envTile.sysFile(StandaloneInstaller.WIFI_XML_REL);
+            tileWifiXml.getParentFile().mkdirs();
+            Files.write(tileWifiXml.toPath(), StandaloneInstaller.WIFI_XML_CONTENT.getBytes(StandardCharsets.UTF_8));
+            File tileCfg = envTile.sysFile("/system/onebin/cvev_us/featurexml.cfg");
+            tileCfg.getParentFile().mkdirs();
+            Files.write(tileCfg.toPath(), commentedCfg.getBytes(StandardCharsets.UTF_8));
+            envTile.setprop("ro.mobis.onebindir", "cvev_us");
+            envTile.setprop("persist.wifi.state", "3");
+            envTile.setprop("sys.boot_completed", "1");
+
+            File tilePkgDir = envTile.sysFile("/data/nemesis/apps/fitcamx.gen5w");
+            tilePkgDir.mkdirs();
+            boolean tileRestart = StandaloneInstaller.installStandalone(envTile, tilePkgDir, modZip);
+            StandaloneInstaller.uninstallStandalone(envTile, tilePkgDir, false);
+
+            check("StandaloneInstaller preserves pre-existing Tilepad Wi-Fi client configuration on uninstall",
+                  !tileRestart
+                  && tileWifiXml.isFile()
+                  && commentedCfg.equals(new String(Files.readAllBytes(tileCfg.toPath()), StandardCharsets.UTF_8))
+                  && "3".equals(envTile.getprop("persist.wifi.state")));
+        } finally {
+            deleteTree(tempRoot);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== FITCAMX Gen5W Automated Java Unit & Integration Test Suite ===\n");
         testDebugLoggerRamOnly();
@@ -1310,6 +1499,7 @@ public class FitcamUnitTests {
         testOemViewRotationAndGeometry();
         testPmapParserAndUsbDashcamScanner();
         testFormatSdCardAndRearProbe();
+        testStandaloneNemesisAndRootDaemon();
 
         System.out.println("\n=== Java Test Summary: " + passed + " passed, " + failed + " failed ===");
         if (failed > 0) {

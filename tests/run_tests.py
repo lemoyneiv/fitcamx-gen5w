@@ -70,7 +70,7 @@ def run_build_if_needed(force_rebuild: bool):
         and os.path.isfile(apk_path)
         and os.path.isdir(classes_dir)
         and os.path.isdir(daemon_classes_dir)
-        and len(dist_zips) >= 4
+        and len(dist_zips) >= 3
     ):
         print("=== [Step 1] Building APK & HMG-API Package ===")
         subprocess.run([sys.executable, os.path.join(BASE_DIR, "tools", "build_package.py")], check=True)
@@ -171,8 +171,16 @@ def verify_dex_and_jni():
     daemon_dex_file = os.path.join(BUILD_DIR, "daemon_dex", "classes.dex")
     daemon_classes = _audit_dex_against_api19(daemon_dex_file, "svc/rearcam.jar", "Lfitcamx/rearcam/", api19_classes)
     check(
-        "svc/rearcam.jar bundles RearCamDaemon & PmapParser DEX classes",
-        "Lfitcamx/rearcam/RearCamDaemon;" in daemon_classes and "Lfitcamx/rearcam/PmapParser;" in daemon_classes,
+        "svc/rearcam.jar bundles RearCamDaemon, PmapParser, StandaloneRootDaemon & StandaloneInstaller DEX classes",
+        all(
+            c in daemon_classes
+            for c in (
+                "Lfitcamx/rearcam/RearCamDaemon;",
+                "Lfitcamx/rearcam/PmapParser;",
+                "Lfitcamx/rearcam/StandaloneRootDaemon;",
+                "Lfitcamx/rearcam/StandaloneInstaller;",
+            )
+        ),
     )
 
     required_jni_classes = [
@@ -303,8 +311,8 @@ def verify_operational_invariants():
     mod_ver = mod_obj.get("version", "")
     mod_id = mod_obj.get("id", "fitcamx-gen5w")
     check("AndroidManifest.xml versionName matches mod/mod.json version", f'android:versionName="{mod_ver}"' in manifest_txt, f"version={mod_ver}")
-    check("mod/mod.json declares authors=['lemoyneiv'] and version='1.0.0'",
-          mod_obj.get("authors") == ["lemoyneiv"] and mod_ver == "1.0.0")
+    check("mod/mod.json declares authors=['lemoyneiv'] and version='1.1.0'",
+          mod_obj.get("authors") == ["lemoyneiv"] and mod_ver == "1.1.0")
     check("mod/mod.json has NO 'media.codecs' dependency", "media.codecs" not in mod_raw and "depends" not in mod_obj)
     check("mod/mod.json declares wifi.client=true and usb=['DashcamFootage']",
           mod_obj.get("wifi", {}).get("client") is True and mod_obj.get("usb") == ["DashcamFootage"])
@@ -331,10 +339,19 @@ def verify_operational_invariants():
           tile_dim == (128, 128) and dis_dim == (128, 128) and icons_distinct,
           f"tile={tile_dim}, tile_disabled={dis_dim}")
 
-    # 5. Shell script syntax & HMG-API mksh check-scripts.sh verification
+    # 5. Shell script syntax & HMG-API mksh check-scripts.sh verification across mod/ and nemesis/
     sh_bin = shutil.which("sh")
+    all_unit_scripts = (
+        "mod/open.sh",
+        "mod/svc/reboot.sh",
+        "mod/svc/screenshot.sh",
+        "nemesis/bin/service.sh",
+        "nemesis/scripts/preinstall.sh",
+        "nemesis/scripts/postinstall.sh",
+        "nemesis/scripts/preuninstall.sh",
+    )
     if sh_bin:
-        for script_rel in ("mod/open.sh", "mod/svc/reboot.sh", "mod/svc/screenshot.sh"):
+        for script_rel in all_unit_scripts:
             script_p = os.path.join(BASE_DIR, script_rel)
             if os.path.isfile(script_p):
                 r = subprocess.run([sh_bin, "-n", script_p], capture_output=True, text=True)
@@ -343,26 +360,65 @@ def verify_operational_invariants():
     hmg_dir = cloud_env.ensure_hmgapi()
     chk_script = os.path.join(hmg_dir, "tools", "check-scripts.sh")
     if os.path.isfile(chk_script) and sh_bin:
-        r_chk = subprocess.run([sh_bin, chk_script, os.path.join(BASE_DIR, "mod")], capture_output=True, text=True)
-        check("HMG-API tools/check-scripts.sh (KitKat mksh/toybox conformance)", r_chk.returncode == 0, r_chk.stdout.strip())
+        r_chk = subprocess.run(
+            [sh_bin, chk_script, os.path.join(BASE_DIR, "mod"), os.path.join(BASE_DIR, "nemesis")],
+            capture_output=True,
+            text=True,
+        )
+        check("HMG-API tools/check-scripts.sh (KitKat mksh/toolbox conformance on mod/ & nemesis/)",
+              r_chk.returncode == 0, r_chk.stdout.strip())
 
-    # 6. Release archive & NEMESIS package conformance (04-Packages.md)
+    # 6. Release archive, Universal USB layout & Adaptive NEMESIS package conformance (04-Packages.md)
     dist_dir = os.path.join(BASE_DIR, "dist")
     expected_pkgs = [
+        f"{mod_id}-v{mod_ver}-usb.zip",
         f"{mod_id}-v{mod_ver}.hmgapi.zip",
-        f"{mod_id}-v{mod_ver}-hmgapi-usb.zip",
         f"{mod_id}-v{mod_ver}-nemesis-package.zip",
-        f"{mod_id}-v{mod_ver}-nemesis-usb.zip",
     ]
     missing_pkgs = [fn for fn in expected_pkgs if not os.path.isfile(os.path.join(dist_dir, fn))]
-    check(f"All 4 signed v{mod_ver} release archives present in dist/", len(missing_pkgs) == 0, str(missing_pkgs))
+    check(f"All 3 signed v{mod_ver} release archives present in dist/", len(missing_pkgs) == 0, str(missing_pkgs))
 
+    def fat_name_issues(zip_path: str) -> list[str]:
+        issues = []
+        seen = {}
+        with zipfile.ZipFile(zip_path) as zf:
+            for n in zf.namelist():
+                parts = n.rstrip("/").split("/")
+                for idx in range(1, len(parts) + 1):
+                    prefix = "/".join(parts[:idx])
+                    prev = seen.setdefault(prefix.lower(), prefix)
+                    if prev != prefix:
+                        issues.append(f"case clash: {prev} vs {prefix}")
+                    seg = parts[idx - 1]
+                    if any(c in seg for c in '<>:"\\|?*') or seg.endswith((".", " ")):
+                        issues.append(f"invalid FAT name: {prefix}")
+        return sorted(set(issues))
+
+    for pkg_fn in expected_pkgs:
+        zp = os.path.join(dist_dir, pkg_fn)
+        if os.path.isfile(zp):
+            errs = fat_name_issues(zp)
+            check(f"FAT32/exFAT filename & case-collision check: {pkg_fn}", len(errs) == 0, str(errs))
+
+    hmgapi_zip_path = os.path.join(dist_dir, f"{mod_id}-v{mod_ver}.hmgapi.zip")
     nem_pkg_path = os.path.join(dist_dir, f"{mod_id}-v{mod_ver}-nemesis-package.zip")
+    univ_usb_path = os.path.join(dist_dir, f"{mod_id}-v{mod_ver}-usb.zip")
+
     if os.path.isfile(nem_pkg_path):
         with zipfile.ZipFile(nem_pkg_path) as z:
+            names = set(z.namelist())
             data = z.read("NEMESIS.data").decode("utf-8")
-            check("NEMESIS package descriptor specifies version=1.1", "version=1.1" in data)
-            check("NEMESIS package descriptor specifies type=application", "type=application" in data)
+            check("Adaptive NEMESIS package uses id=fitcamx.gen5w and version=1.1",
+                  "id=fitcamx.gen5w\n" in data and "version=1.1\n" in data)
+            check("Adaptive NEMESIS package has type=application and no mandatory hmgapi dependency",
+                  "type=application\n" in data and 'depends=""\n' in data and "media.codecs" not in data)
+            check("Adaptive NEMESIS package bundles bin/rearcam.jar, bin/service.sh, bin/open.sh, mod/package.zip & scripts",
+                  {"bin/rearcam.jar", "bin/service.sh", "bin/open.sh", "mod/id", "mod/package.zip",
+                   "scripts/preinstall.sh", "scripts/postinstall.sh", "scripts/preuninstall.sh"}.issubset(names))
+            check("Adaptive NEMESIS package declares [app.0] kind=sh (preserving /data/data/fitcamx.app on updates) and [service.0] mode=background",
+                  "[app.0]\nkind=sh\npath=bin/open.sh" in data
+                  and "package=" not in data
+                  and "[service.0]\nname=fitcamx-root\nkind=sh\npath=bin/service.sh\nuid=root\nmode=background" in data)
             m_short = re.search(r'short-desc="([^"]+)"', data)
             check("NEMESIS package short-desc <= 64 chars", m_short is not None and len(m_short.group(1)) <= 64,
                   f"len={len(m_short.group(1)) if m_short else 0}")
@@ -370,18 +426,210 @@ def verify_operational_invariants():
             check("NEMESIS package detailed-desc <= 256 chars", m_detail is not None and len(m_detail.group(1)) <= 256,
                   f"len={len(m_detail.group(1)) if m_detail else 0}")
 
-    nem_usb_path = os.path.join(dist_dir, f"{mod_id}-v{mod_ver}-nemesis-usb.zip")
-    if os.path.isfile(nem_usb_path):
-        with zipfile.ZipFile(nem_usb_path) as z:
-            data = z.read("NEMESIS.data").decode("utf-8")
-            check("NEMESIS USB installer descriptor specifies version=1.1", "version=1.1" in data)
-            check("NEMESIS USB installer descriptor specifies type=install", "type=install" in data)
+    if os.path.isfile(univ_usb_path) and os.path.isfile(hmgapi_zip_path) and os.path.isfile(nem_pkg_path):
+        with zipfile.ZipFile(univ_usb_path) as z:
+            usb_names = set(z.namelist())
+            usb_data = z.read("NEMESIS.data").decode("utf-8")
+            hmg_member = f"HMGAPI/updates/{mod_id}-v{mod_ver}.zip"
+            nem_member = "packages/fitcamx.gen5w.zip"
+            check("Single universal USB zip contains BOTH HMGAPI/updates/*.zip and NEMESIS packages/fitcamx.gen5w.zip + README.txt",
+                  {hmg_member, nem_member, "NEMESIS.data", "README.txt"}.issubset(usb_names))
+            check("Universal USB NEMESIS.data specifies version=1.1, type=install, path=packages/fitcamx.gen5w.zip",
+                  "version=1.1\n" in usb_data and "type=install\n" in usb_data and f"path={nem_member}\n" in usb_data)
+            check("Universal USB embedded payloads match standalone .hmgapi.zip and -nemesis-package.zip byte-for-byte",
+                  z.read(hmg_member) == open(hmgapi_zip_path, "rb").read()
+                  and z.read(nem_member) == open(nem_pkg_path, "rb").read())
 
     vlc_mgr_src = open(os.path.join(BASE_DIR, "app", "src", "fitcamx", "app", "VlcPlayerManager.java"), "r", encoding="utf-8").read()
     check("VlcPlayerManager preserves 4-core frame-threading on 4K HEVC (no thread_type=slice option)",
           ':avcodec-options={thread_type=slice}' not in vlc_mgr_src)
     check("VlcPlayerManager isolates gallery sessions via generation counter (bindGalleryEventListener)",
           "bindGalleryEventListener(" in vlc_mgr_src and "gallerySessionActive = false" not in vlc_mgr_src)
+
+
+def verify_adaptive_nemesis_lifecycle():
+    print("\n=== [Step 6] End-to-End Adaptive NEMESIS Hook Simulation (Standalone, HMG-API & Migration) ===")
+    sh_bin = shutil.which("sh")
+    if not sh_bin:
+        print("  [SKIP] POSIX sh unavailable on this host")
+        return
+
+    mod_obj = json.load(open(os.path.join(BASE_DIR, "mod", "mod.json"), encoding="utf-8"))
+    mod_id = mod_obj["id"]
+    mod_ver = mod_obj["version"]
+    nem_pkg = os.path.join(BASE_DIR, "dist", f"{mod_id}-v{mod_ver}-nemesis-package.zip")
+    univ_usb = os.path.join(BASE_DIR, "dist", f"{mod_id}-v{mod_ver}-usb.zip")
+    hmg_dir = cloud_env.ensure_hmgapi()
+
+    with tempfile.TemporaryDirectory(prefix="fitcam_e2e_nemesis_") as tmp:
+        # Compile HMG-API's real host Engine so we test real HMG-API integration + UsbUpdates.scan!
+        hmg_cp = os.path.join(tmp, "hmg_cp")
+        os.makedirs(hmg_cp, exist_ok=True)
+        hmg_java_srcs = glob.glob(os.path.join(hmg_dir, "core", "runtime", "java", "hmgapi", "engine", "*.java"))
+        subprocess.run([JAVAC, "--release", "8", "-nowarn", "-Xlint:-options", "-d", hmg_cp] + hmg_java_srcs, check=True)
+
+        daemon_cp = os.path.join(BUILD_DIR, "daemon_classes") + os.pathsep + ANDROID_JAR
+
+        def snapshot_tree(sys_dir: str) -> dict[str, bytes]:
+            snap = {}
+            for root, _, files in os.walk(sys_dir):
+                for fn in sorted(files):
+                    fp = os.path.join(root, fn)
+                    rel = os.path.relpath(fp, sys_dir).replace("\\", "/")
+                    snap[rel] = open(fp, "rb").read()
+            return snap
+
+        def make_unit_root(name: str, with_hmgapi: bool):
+            r = os.path.join(tmp, name)
+            os.makedirs(os.path.join(r, "system", "bin"), exist_ok=True)
+            os.makedirs(os.path.join(r, "system", "etc", "permissions"), exist_ok=True)
+            os.makedirs(os.path.join(r, "system", "onebin", "cvev_us"), exist_ok=True)
+            os.makedirs(os.path.join(r, "data", "local", "tmp", "nemesis", "stage"), exist_ok=True)
+            os.makedirs(os.path.join(r, "data", "nemesis", "apps"), exist_ok=True)
+            with open(os.path.join(r, "system", "build.prop"), "w", encoding="utf-8") as f:
+                f.write("ro.build.product=CVEV.USA.0000.V015.012.260507\n")
+            with open(os.path.join(r, "system", "onebin", "cvev_us", "featurexml.cfg"), "w", encoding="utf-8") as f:
+                f.write("-/system/etc/permissions/android.hardware.wifi.xml\n-/system/etc/permissions/com.hkmc.other.xml\n")
+            with open(os.path.join(r, "data", "local", "tmp", "test.props"), "w", encoding="utf-8") as f:
+                f.write("ro.mobis.onebindir=cvev_us\npersist.wifi.state=1\nsys.boot_completed=1\n")
+            if with_hmgapi:
+                install_hmgapi_on_unit(r)
+            return r
+
+        def install_hmgapi_on_unit(r: str):
+            os.makedirs(os.path.join(r, "data", "hmgapi", "mods"), exist_ok=True)
+            os.makedirs(os.path.join(r, "data", "hmgapi", "settings"), exist_ok=True)
+            open(os.path.join(r, "data", "hmgapi", "uninstall.sh"), "w").close()
+            hmgapid_stub = os.path.join(r, "system", "bin", "hmgapid")
+            with open(hmgapid_stub, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "case \"$1\" in\n"
+                    "  ping|daemon) exit 0 ;;\n"
+                    "  engine) shift; exec env "
+                    f"HMGAPI_ROOT='{r}' HMGAPI_HOST=1 HMGAPI_PRODUCT=CVEV.USA.0000.V015.012.260507 HMGAPI_ONEBIN=cvev_us "
+                    f"'{JAVA}' -cp '{hmg_cp}' hmgapi.engine.Engine \"$@\" ;;\n"
+                    "esac\nexit 2\n"
+                )
+            os.chmod(hmgapid_stub, 0o755)
+
+        def run_nemesis_cmd(unit_root: str, action: str, update: bool = False):
+            apps_dir = os.path.join(unit_root, "data", "nemesis", "apps")
+            pkg_id = "fitcamx.gen5w"
+            pkg_dir = os.path.join(apps_dir, pkg_id)
+            stage_dir = os.path.join(unit_root, "data", "local", "tmp", "nemesis", "stage", pkg_id)
+            env = os.environ.copy()
+            env["ROOT"] = unit_root
+            env["FITCAMX_HOST_TEST"] = "1"
+            env["FITCAMX_HOST_JAVA"] = JAVA
+            env["FITCAMX_HOST_CLASSPATH"] = daemon_cp
+
+            if action == "install":
+                shutil.rmtree(stage_dir, ignore_errors=True)
+                os.makedirs(stage_dir, exist_ok=True)
+                with zipfile.ZipFile(nem_pkg, "r") as z:
+                    z.extractall(stage_dir)
+                if os.path.isdir(pkg_dir):
+                    r_preun = subprocess.run([sh_bin, "scripts/preuninstall.sh"], cwd=pkg_dir, env=env, capture_output=True, text=True)
+                    if r_preun.returncode != 0:
+                        return r_preun.returncode, r_preun.stdout + r_preun.stderr
+                    shutil.rmtree(pkg_dir)
+                r_prein = subprocess.run([sh_bin, "scripts/preinstall.sh"], cwd=stage_dir, env=env, capture_output=True, text=True)
+                if r_prein.returncode != 0:
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    return r_prein.returncode, r_prein.stdout + r_prein.stderr
+                shutil.copytree(stage_dir, pkg_dir)
+                r_post = subprocess.run([sh_bin, "scripts/postinstall.sh"], cwd=pkg_dir, env=env, capture_output=True, text=True)
+                shutil.rmtree(stage_dir, ignore_errors=True)
+                return r_post.returncode, r_post.stdout + r_post.stderr
+            elif action == "uninstall":
+                # Invoke via a wrapper script with "uninstall" in $0 so /proc/$PPID/cmdline matches real nemesis uninstall
+                uninst_driver = os.path.join(tmp, "nemesis_uninstall_runner.sh")
+                with open(uninst_driver, "w", encoding="utf-8") as f:
+                    f.write(f"#!/bin/sh\ncd '{pkg_dir}' && '{sh_bin}' scripts/preuninstall.sh\n")
+                os.chmod(uninst_driver, 0o755)
+                r_un = subprocess.run([sh_bin, uninst_driver], env=env, capture_output=True, text=True)
+                if r_un.returncode == 0:
+                    shutil.rmtree(pkg_dir, ignore_errors=True)
+                return r_un.returncode, r_un.stdout + r_un.stderr
+            raise ValueError(action)
+
+        # Case A: Standalone NEMESIS unit (NO HMG-API installed)
+        unit_a = make_unit_root("standalone_unit", with_hmgapi=False)
+        stock_a = snapshot_tree(os.path.join(unit_a, "system"))
+        rc_in, out_in = run_nemesis_cmd(unit_a, "install")
+        mode_a = open(os.path.join(unit_a, "data", "nemesis", "apps", "fitcamx.gen5w", "mode")).read().strip()
+        wifi_xml_a = os.path.isfile(os.path.join(unit_a, "system", "etc", "permissions", "android.hardware.wifi.xml"))
+        cfg_a = open(os.path.join(unit_a, "system", "onebin", "cvev_us", "featurexml.cfg")).read()
+        apk_a = "fitcamx.app " in open(os.path.join(unit_a, "data", "system", "packages.list")).read()
+        rc_up, _ = run_nemesis_cmd(unit_a, "install", update=True)
+        rc_un, out_un = run_nemesis_cmd(unit_a, "uninstall")
+        after_a = snapshot_tree(os.path.join(unit_a, "system"))
+        check("E2E Standalone NEMESIS (no HMG-API): installs, updates, enables Wi-Fi + APK, and restores /system byte-identically on uninstall",
+              rc_in == 0 and mode_a == "standalone" and wifi_xml_a
+              and "#-/system/etc/permissions/android.hardware.wifi.xml" in cfg_a
+              and apk_a and rc_up == 0 and rc_un == 0 and after_a == stock_a,
+              out_in.strip().splitlines()[-1] if out_in.strip() else "")
+
+        # Case B: HMG-API unit + Universal USB stick scan + NEMESIS install/update/uninstall
+        unit_b = make_unit_root("hmgapi_unit", with_hmgapi=True)
+        stock_b = snapshot_tree(os.path.join(unit_b, "system"))
+        stick_dir = os.path.join(tmp, "usb_stick")
+        with zipfile.ZipFile(univ_usb, "r") as z:
+            z.extractall(stick_dir)
+        scan_env = os.environ.copy()
+        scan_env.update({
+            "HMGAPI_ROOT": unit_b,
+            "HMGAPI_HOST": "1",
+            "HMGAPI_PRODUCT": "CVEV.USA.0000.V015.012.260507",
+            "HMGAPI_ONEBIN": "cvev_us",
+            "HMGAPI_USB_DIRS": stick_dir,
+        })
+        scan_out = subprocess.check_output([JAVA, "-cp", hmg_cp, "hmgapi.engine.Engine", "usb-scan"], env=scan_env, text=True)
+        scan_json = json.loads(scan_out)
+        usb_pkgs = scan_json.get("packages", [])
+        check("HMG-API Engine usb-scan recognizes universal -usb.zip as a valid signed fitcamx-gen5w mod update",
+              len(usb_pkgs) == 1
+              and usb_pkgs[0].get("id") == mod_id
+              and usb_pkgs[0].get("version") == mod_ver
+              and usb_pkgs[0].get("status") == "new")
+
+        rc_hb_in, out_hb_in = run_nemesis_cmd(unit_b, "install")
+        mode_b = open(os.path.join(unit_b, "data", "nemesis", "apps", "fitcamx.gen5w", "mode")).read().strip()
+        in_hmg_mods = os.path.isfile(os.path.join(unit_b, "data", "hmgapi", "mods", mod_id, "mod.json"))
+        no_standalone_flag = not os.path.exists(os.path.join(unit_b, "data", "nemesis", "apps", "fitcamx.gen5w", "standalone", "enabled"))
+        rc_hb_up, _ = run_nemesis_cmd(unit_b, "install", update=True)
+        rc_hb_un, _ = run_nemesis_cmd(unit_b, "uninstall")
+        after_b = snapshot_tree(os.path.join(unit_b, "system"))
+        check("E2E HMG-API Mode: adaptive NEMESIS package delegates to HMG-API engine and restores /system byte-identically on uninstall",
+              rc_hb_in == 0 and mode_b == "hmgapi" and in_hmg_mods and no_standalone_flag
+              and rc_hb_up == 0 and rc_hb_un == 0 and after_b == stock_b,
+              out_hb_in.strip().splitlines()[-1] if out_hb_in.strip() else "")
+
+        # Case C: Standalone -> HMG-API Migration (user starts without HMG-API, later installs HMG-API & updates FITCAMX)
+        unit_c = make_unit_root("migrate_unit", with_hmgapi=False)
+        stock_c = snapshot_tree(os.path.join(unit_c, "system"))
+        rc_c1, _ = run_nemesis_cmd(unit_c, "install")
+        pref_file = os.path.join(unit_c, "data", "data", "fitcamx.app", "shared_prefs", "prefs.xml")
+        os.makedirs(os.path.dirname(pref_file), exist_ok=True)
+        with open(pref_file, "w", encoding="utf-8") as f:
+            f.write("<map><string name='theme'>ioniq_teal</string></map>")
+        # Now install HMG-API on unit_c and update fitcamx.gen5w!
+        install_hmgapi_on_unit(unit_c)
+        rc_c2, _ = run_nemesis_cmd(unit_c, "install", update=True)
+        mode_c = open(os.path.join(unit_c, "data", "nemesis", "apps", "fitcamx.gen5w", "mode")).read().strip()
+        hmg_adopted_app = os.path.isfile(os.path.join(unit_c, "data", "hmgapi", "state", "apps.json")) and (
+            "fitcamx.app" in open(os.path.join(unit_c, "data", "hmgapi", "state", "apps.json")).read()
+        )
+        prefs_preserved = os.path.isfile(pref_file)
+        no_stale_nem_backup = not os.path.exists(os.path.join(unit_c, "data", "nemesis", "backup", "fitcamx.gen5w"))
+        rc_c3, _ = run_nemesis_cmd(unit_c, "uninstall")
+        after_c = snapshot_tree(os.path.join(unit_c, "system"))
+        after_c_without_hmgapid = {k: v for k, v in after_c.items() if k != "bin/hmgapid"}
+        check("E2E Standalone -> HMG-API Migration: preserves user settings, hands off APK & Wi-Fi ownership to HMG-API, and restores /system byte-identically",
+              rc_c1 == 0 and rc_c2 == 0 and mode_c == "hmgapi"
+              and hmg_adopted_app and prefs_preserved and no_stale_nem_backup
+              and rc_c3 == 0 and "bin/hmgapid" in after_c and after_c_without_hmgapid == stock_c)
 
 
 def main():
@@ -391,6 +639,7 @@ def main():
     verify_dex_and_jni()
     verify_apk_and_elf()
     verify_operational_invariants()
+    verify_adaptive_nemesis_lifecycle()
 
     print(f"\n============================================================")
     print(f"FINAL VERIFICATION SUMMARY: {passed} passed, {failed} failed")
