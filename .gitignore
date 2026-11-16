@@ -1,8 +1,10 @@
 # Build outputs & release archives (published via GitHub Releases / CI / Google Drive)
-build/
-bin/
-gen/
-out/
+/build/
+/bin/
+!nemesis/bin/
+!nemesis/bin/**
+/gen/
+/out/
 dist/*.zip
 dist/SHA256SUMS.txt
 third_party/
