@@ -879,9 +879,9 @@ public class FitcamUnitTests {
               && mirrorEngineOpts.contains("--no-spu"));
 
         List<String> mediaOpts = VlcPlayerManager.buildLiveMediaOptions(true);
-        check("buildLiveMediaOptions configures low-latency TCP RTSP caching without dead input-level video-filter flags",
+        check("buildLiveMediaOptions configures 500ms TCP RTSP caching without dead input-level video-filter flags",
               mediaOpts.contains(":rtsp-tcp")
-              && mediaOpts.contains(":network-caching=300")
+              && mediaOpts.contains(":network-caching=500")
               && mediaOpts.contains(":ipv4-timeout=5000")
               && !mediaOpts.contains(":video-filter=transform"));
 
@@ -1159,9 +1159,13 @@ public class FitcamUnitTests {
 
     private static void testFormatSdCardAndRearProbe() throws Exception {
         System.out.println("\n--- 16. Non-Disruptive Rear Channel Probe & Format SD Card Recovery Sequence ---");
-        check("inferRearChannelFromStatusXml detects dual-cam index>=6 (TRUE), missing 3028 (FALSE), and ambiguous single index (null)",
+        check("inferRearChannelFromStatusXml detects dual-cam index>=6 with 3028 (TRUE), front-only 4K index 6 missing/-256 3028 (FALSE), and ambiguous single index (null)",
               Boolean.TRUE.equals(CameraClient.inferRearChannelFromStatusXml(
                       "<Function><Cmd>2002</Cmd><Status>6</Status><Cmd>3028</Cmd><Status>0</Status></Function>"))
+              && Boolean.FALSE.equals(CameraClient.inferRearChannelFromStatusXml(
+                      "<Function><Cmd>2002</Cmd><Status>6</Status><Cmd>2001</Cmd><Status>1</Status></Function>"))
+              && Boolean.FALSE.equals(CameraClient.inferRearChannelFromStatusXml(
+                      "<Function><Cmd>2002</Cmd><Status>6</Status><Cmd>3028</Cmd><Status>-256</Status></Function>"))
               && Boolean.FALSE.equals(CameraClient.inferRearChannelFromStatusXml(
                       "<Function><Cmd>2002</Cmd><Status>0</Status><Cmd>2001</Cmd><Status>1</Status></Function>"))
               && CameraClient.inferRearChannelFromStatusXml(
@@ -1481,6 +1485,159 @@ public class FitcamUnitTests {
         }
     }
 
+    private static void test4kLivePreviewFallbackAndSinglePassResolution() throws Exception {
+        System.out.println("\n--- 18. Single-ISP 4K Paused-Recording Live Preview & Single-Pass Resolution ---");
+
+        check("isImmediate4kRecordingStall matches 0-frame & <5000ms pre-recording ring-buffer stalls only in unverified 4K recording mode",
+              MainActivity.isImmediate4kRecordingStall(false, true, false, false, 1370L)
+              && MainActivity.isImmediate4kRecordingStall(false, true, false, true, 3120L)
+              && !MainActivity.isImmediate4kRecordingStall(false, true, false, true, 5000L)
+              && !MainActivity.isImmediate4kRecordingStall(false, true, false, true, 8500L)
+              && !MainActivity.isImmediate4kRecordingStall(true, true, false, false, 1200L)
+              && !MainActivity.isImmediate4kRecordingStall(false, false, false, false, 1200L)
+              && !MainActivity.isImmediate4kRecordingStall(false, true, true, false, 1200L));
+
+        check("shouldFallbackToPaused4kLivePreview triggers at 2 consecutive immediate 4K stalls and respects guards",
+              !MainActivity.shouldFallbackToPaused4kLivePreview(false, true, false, false, 1)
+              && MainActivity.shouldFallbackToPaused4kLivePreview(false, true, false, false, 2)
+              && !MainActivity.shouldFallbackToPaused4kLivePreview(true, true, false, false, 3)
+              && !MainActivity.shouldFallbackToPaused4kLivePreview(false, false, false, false, 3)
+              && !MainActivity.shouldFallbackToPaused4kLivePreview(false, true, true, false, 3)
+              && !MainActivity.shouldFallbackToPaused4kLivePreview(false, true, false, true, 3));
+
+        final List<String> queries = Collections.synchronizedList(new ArrayList<String>());
+        final AtomicInteger stopRecAttempts = new AtomicInteger(0);
+        final AtomicBoolean slowStartRecFor4k = new AtomicBoolean(false);
+        final AtomicBoolean startRecDelivered = new AtomicBoolean(false);
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange ex) throws IOException {
+                String q = ex.getRequestURI().getRawQuery();
+                if (q != null) {
+                    queries.add(q);
+                }
+                byte[] resp;
+                if (q != null && q.contains("cmd=2001&par=0")) {
+                    int n = stopRecAttempts.incrementAndGet();
+                    int st = (n == 1) ? -13 : 0;
+                    resp = ("<Function><Cmd>2001</Cmd><Status>" + st + "</Status></Function>")
+                            .getBytes(StandardCharsets.UTF_8);
+                } else if (q != null && q.contains("cmd=3028")) {
+                    resp = "<Function><Cmd>3028</Cmd><Status>-256</Status></Function>"
+                            .getBytes(StandardCharsets.UTF_8);
+                } else if (q != null && q.contains("cmd=2019")) {
+                    resp = "<Function><Cmd>2019</Cmd><Status>0</Status><MovieLiveViewLink>rtsp://127.0.0.1/xxx.mov</MovieLiveViewLink></Function>"
+                            .getBytes(StandardCharsets.UTF_8);
+                } else if (q != null && q.contains("cmd=2001&par=1")) {
+                    if (slowStartRecFor4k.get()) {
+                        try {
+                            Thread.sleep(1350L);
+                        } catch (InterruptedException ignored) {}
+                    }
+                    startRecDelivered.set(true);
+                    resp = "<Function><Cmd>2001</Cmd><Status>0</Status></Function>"
+                            .getBytes(StandardCharsets.UTF_8);
+                } else {
+                    resp = "<Function><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                }
+                ex.sendResponseHeaders(200, resp.length);
+                OutputStream os = ex.getResponseBody();
+                os.write(resp);
+                os.close();
+            }
+        });
+        server.start();
+
+        CameraClient cam = new CameraClient("127.0.0.1");
+        cam.setSocType(CameraClient.SocType.NOVATEK, server.getAddress().getPort());
+        try {
+            // 1. Paused-recording 4K Live Preview: retries -13 on 2001&par=0, learns -256 on 3028, starts 2015&par=1, omits 2001&par=1
+            final CountDownLatch l1 = new CountDownLatch(1);
+            final AtomicReference<List<String>> urls1 = new AtomicReference<List<String>>();
+            cam.prepareAndStartLiveView(CameraClient.VIEW_FRONT, false, new CameraClient.Callback<List<String>>() {
+                @Override public void onSuccess(List<String> r) { urls1.set(r); l1.countDown(); }
+                @Override public void onError(Exception e) { l1.countDown(); }
+            });
+            boolean ok1 = l1.await(5, TimeUnit.SECONDS);
+            int stopCount1 = 0;
+            int ch3028Count1 = 0;
+            boolean startedLive1 = false;
+            boolean resumedRec1 = false;
+            synchronized (queries) {
+                for (String q : queries) {
+                    if (q.contains("cmd=2001&par=0")) stopCount1++;
+                    if (q.contains("cmd=3028")) ch3028Count1++;
+                    if (q.contains("cmd=2015&par=1")) startedLive1 = true;
+                    if (q.contains("cmd=2001&par=1")) resumedRec1 = true;
+                }
+            }
+            check("prepareAndStartLiveView(..., false) retries Status -13 on stop-rec, starts 2015&par=1, and omits 2001&par=1",
+                  ok1 && urls1.get() != null && !urls1.get().isEmpty()
+                  && "rtsp://127.0.0.1/xxx.mov".equals(urls1.get().get(0))
+                  && stopCount1 == 2 && ch3028Count1 == 1 && startedLive1 && !resumedRec1);
+
+            // 2. Subsequent resumeRecording=true call skips unsupported cmd=3028 and resumes cmd=2001&par=1
+            queries.clear();
+            final CountDownLatch l2 = new CountDownLatch(1);
+            cam.prepareAndStartLiveView(CameraClient.VIEW_FRONT, true, new CameraClient.Callback<List<String>>() {
+                @Override public void onSuccess(List<String> r) { l2.countDown(); }
+                @Override public void onError(Exception e) { l2.countDown(); }
+            });
+            boolean ok2 = l2.await(5, TimeUnit.SECONDS);
+            boolean sent3028SecondTime = false;
+            boolean resumedRec2 = false;
+            synchronized (queries) {
+                for (String q : queries) {
+                    if (q.contains("cmd=3028")) sent3028SecondTime = true;
+                    if (q.contains("cmd=2001&par=1")) resumedRec2 = true;
+                }
+            }
+            check("prepareAndStartLiveView(..., true) skips cached unsupported cmd=3028 and resumes cmd=2001&par=1",
+                  ok2 && !sent3028SecondTime && resumedRec2);
+
+            // 3. Single-pass setVideoResolution(6, true) skips redundant 2015&par=1 and 2001&par=1
+            queries.clear();
+            final CountDownLatch l3 = new CountDownLatch(1);
+            final AtomicBoolean resOk = new AtomicBoolean(false);
+            cam.setVideoResolution(6, true, new CameraClient.Callback<Boolean>() {
+                @Override public void onSuccess(Boolean r) { resOk.set(Boolean.TRUE.equals(r)); l3.countDown(); }
+                @Override public void onError(Exception e) { l3.countDown(); }
+            });
+            boolean ok3 = l3.await(5, TimeUnit.SECONDS);
+            boolean sentRes6 = false;
+            boolean sentRedundantRestart = false;
+            synchronized (queries) {
+                for (String q : queries) {
+                    if (q.contains("cmd=2002&par=6")) sentRes6 = true;
+                    if (q.contains("cmd=2015&par=1") || q.contains("cmd=2001&par=1")) sentRedundantRestart = true;
+                }
+            }
+            check("setVideoResolution(6, true) sets 4K index without redundant encoder/recording restart before startLiveStream()",
+                  ok3 && resOk.get() && sentRes6 && !sentRedundantRestart);
+
+            // 4. ensureRecordingBeforeTeardown(..., 2200L) waits cleanly across ~1.35s 4K .TS segment open
+            queries.clear();
+            startRecDelivered.set(false);
+            slowStartRecFor4k.set(true);
+            final CountDownLatch l4 = new CountDownLatch(1);
+            cam.ensureRecordingBeforeTeardown(new Runnable() {
+                @Override
+                public void run() {
+                    l4.countDown();
+                }
+            }, 2200L);
+            boolean ok4 = l4.await(4, TimeUnit.SECONDS);
+            cam.clearTeardownFlag();
+            check("ensureRecordingBeforeTeardown(..., 2200L) completes 1.35s 4K .TS segment open before teardown",
+                  ok4 && startRecDelivered.get());
+        } finally {
+            cam.shutdown();
+            server.stop(0);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== FITCAMX Gen5W Automated Java Unit & Integration Test Suite ===\n");
         testDebugLoggerRamOnly();
@@ -1500,6 +1657,7 @@ public class FitcamUnitTests {
         testPmapParserAndUsbDashcamScanner();
         testFormatSdCardAndRearProbe();
         testStandaloneNemesisAndRootDaemon();
+        test4kLivePreviewFallbackAndSinglePassResolution();
 
         System.out.println("\n=== Java Test Summary: " + passed + " passed, " + failed + " failed ===");
         if (failed > 0) {

@@ -311,8 +311,9 @@ def verify_operational_invariants():
     mod_ver = mod_obj.get("version", "")
     mod_id = mod_obj.get("id", "fitcamx-gen5w")
     check("AndroidManifest.xml versionName matches mod/mod.json version", f'android:versionName="{mod_ver}"' in manifest_txt, f"version={mod_ver}")
-    check("mod/mod.json declares authors=['lemoyneiv'] and version='1.1.0'",
-          mod_obj.get("authors") == ["lemoyneiv"] and mod_ver == "1.1.0")
+    valid_semver = re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)\.(?:0|[1-9][0-9]*))?", mod_ver) is not None
+    check("mod/mod.json declares authors=['lemoyneiv'] and valid semver version",
+          mod_obj.get("authors") == ["lemoyneiv"] and valid_semver, f"version={mod_ver}")
     check("mod/mod.json has NO 'media.codecs' dependency", "media.codecs" not in mod_raw and "depends" not in mod_obj)
     check("mod/mod.json declares wifi.client=true and usb=['DashcamFootage']",
           mod_obj.get("wifi", {}).get("client") is True and mod_obj.get("usb") == ["DashcamFootage"])

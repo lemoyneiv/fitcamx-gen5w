@@ -219,7 +219,7 @@ public class VlcPlayerManager {
     public static List<String> buildLiveMediaOptions(boolean mirrorHorizontal) {
         List<String> opts = new ArrayList<String>(8);
         opts.add(":rtsp-tcp");
-        opts.add(":network-caching=300");
+        opts.add(":network-caching=500");
         opts.add(":ipv4-timeout=5000");
         opts.add(":no-audio"); // mute live preview to avoid vehicle audio interruption
         opts.add(":avcodec-threads=4");
@@ -250,6 +250,8 @@ public class VlcPlayerManager {
     private volatile int gallerySessionGen = 0;
     private volatile boolean liveStopNeeded = false;
     private volatile boolean liveHasPlayed = false;
+    private volatile boolean liveHasVout = false;
+    private volatile boolean lastLiveRenderedVideo = false;
     private volatile long liveOpenStartUptimeMs = 0L;
     private volatile long lastLiveProgressUptimeMs = 0L;
     private int lastLiveReadBytes = 0;
@@ -515,16 +517,22 @@ public class VlcPlayerManager {
                 if (media != null) {
                     try {
                         IMedia.Stats stats = media.getStats();
-                        if (stats != null && didLiveStatsAdvance(
-                                lastLiveReadBytes, lastLiveDemuxBytes,
-                                lastLiveDecodedVideo, lastLiveDisplayedPictures,
-                                stats.readBytes, stats.demuxReadBytes,
-                                stats.decodedVideo, stats.displayedPictures)) {
-                            lastLiveReadBytes = stats.readBytes;
-                            lastLiveDemuxBytes = stats.demuxReadBytes;
-                            lastLiveDecodedVideo = stats.decodedVideo;
-                            lastLiveDisplayedPictures = stats.displayedPictures;
-                            lastLiveProgressUptimeMs = now;
+                        if (stats != null) {
+                            if (stats.decodedVideo > 0 || stats.displayedPictures > 0) {
+                                liveHasVout = true;
+                                lastLiveRenderedVideo = true;
+                            }
+                            if (didLiveStatsAdvance(
+                                    lastLiveReadBytes, lastLiveDemuxBytes,
+                                    lastLiveDecodedVideo, lastLiveDisplayedPictures,
+                                    stats.readBytes, stats.demuxReadBytes,
+                                    stats.decodedVideo, stats.displayedPictures)) {
+                                lastLiveReadBytes = stats.readBytes;
+                                lastLiveDemuxBytes = stats.demuxReadBytes;
+                                lastLiveDecodedVideo = stats.decodedVideo;
+                                lastLiveDisplayedPictures = stats.displayedPictures;
+                                lastLiveProgressUptimeMs = now;
+                            }
                         }
                     } finally {
                         media.release();
@@ -538,7 +546,10 @@ public class VlcPlayerManager {
 
             if (isLiveStreamStalled(liveHasPlayed, lastLiveProgressUptimeMs, now, LIVE_STALL_TIMEOUT_MS)) {
                 long silentMs = now - lastLiveProgressUptimeMs;
-                DebugLogger.log("VLC_LIVE", "Live stream stall detected (no RTP/frame progress for " + silentMs + "ms)");
+                boolean rendered = liveHasVout || lastLiveDecodedVideo > 0 || lastLiveDisplayedPictures > 0;
+                lastLiveRenderedVideo = rendered;
+                DebugLogger.log("VLC_LIVE", "Live stream stall detected (no RTP/frame progress for "
+                        + silentMs + "ms, renderedVideo=" + rendered + ")");
                 stopLiveStream();
                 if (activeListener != null) {
                     activeListener.onStreamStalled(String.format(java.util.Locale.US,
@@ -550,6 +561,10 @@ public class VlcPlayerManager {
             mainHandler.postDelayed(this, LIVE_WATCHDOG_POLL_MS);
         }
     };
+
+    public boolean didLastLiveSessionRenderVideo() {
+        return lastLiveRenderedVideo;
+    }
 
     private void armLiveWatchdog() {
         mainHandler.removeCallbacks(liveWatchdogRunnable);
@@ -571,13 +586,19 @@ public class VlcPlayerManager {
                     case MediaPlayer.Event.Playing:
                         liveHasPlayed = true;
                         lastLiveProgressUptimeMs = SystemClock.uptimeMillis();
-                        DebugLogger.log("VLC_LIVE", "Live stream playing (First frame rendered)");
+                        DebugLogger.log("VLC_LIVE", "Live RTSP session playing (awaiting video frames)");
                         if (listener != null) listener.onPlaying();
                         break;
                     case MediaPlayer.Event.Vout:
                         if (event.getVoutCount() > 0) {
+                            boolean firstVout = !liveHasVout;
                             liveHasPlayed = true;
+                            liveHasVout = true;
+                            lastLiveRenderedVideo = true;
                             lastLiveProgressUptimeMs = SystemClock.uptimeMillis();
+                            if (firstVout) {
+                                DebugLogger.log("VLC_LIVE", "Live video output established (first frame rendered)");
+                            }
                         }
                         break;
                     case MediaPlayer.Event.TimeChanged:
@@ -599,11 +620,13 @@ public class VlcPlayerManager {
                     case MediaPlayer.Event.EndReached: {
                         disarmLiveWatchdog();
                         boolean wasUnexpected = liveStopNeeded;
-                        boolean hadVideo = liveHasPlayed;
+                        boolean hadPlayed = liveHasPlayed;
+                        lastLiveRenderedVideo = liveHasVout || lastLiveDecodedVideo > 0 || lastLiveDisplayedPictures > 0;
                         liveStopNeeded = false;
-                        DebugLogger.log("VLC_LIVE", "Live stream reached EOF (wasPlaying=" + hadVideo + ")");
+                        DebugLogger.log("VLC_LIVE", "Live stream reached EOF (wasPlaying=" + hadPlayed
+                                + ", renderedVideo=" + lastLiveRenderedVideo + ")");
                         if (wasUnexpected && listener != null) {
-                            if (hadVideo) {
+                            if (hadPlayed) {
                                 listener.onStreamStalled("RTSP stream ended (EOF)");
                             } else {
                                 listener.onError("Live stream ended before rendering");
@@ -613,11 +636,13 @@ public class VlcPlayerManager {
                     }
                     case MediaPlayer.Event.EncounteredError: {
                         disarmLiveWatchdog();
-                        boolean hadVideo = liveHasPlayed;
+                        boolean hadPlayed = liveHasPlayed;
+                        lastLiveRenderedVideo = liveHasVout || lastLiveDecodedVideo > 0 || lastLiveDisplayedPictures > 0;
                         liveStopNeeded = false;
-                        DebugLogger.log("VLC_LIVE", "Live stream encountered error (wasPlaying=" + hadVideo + ")");
+                        DebugLogger.log("VLC_LIVE", "Live stream encountered error (wasPlaying=" + hadPlayed
+                                + ", renderedVideo=" + lastLiveRenderedVideo + ")");
                         if (listener != null) {
-                            if (hadVideo) {
+                            if (hadPlayed) {
                                 listener.onStreamStalled("RTSP stream connection error");
                             } else {
                                 listener.onError("Live stream connection error");
@@ -628,6 +653,9 @@ public class VlcPlayerManager {
                     case MediaPlayer.Event.Stopped: {
                         disarmLiveWatchdog();
                         boolean unexpectedStop = liveStopNeeded && liveHasPlayed;
+                        if (unexpectedStop) {
+                            lastLiveRenderedVideo = liveHasVout || lastLiveDecodedVideo > 0 || lastLiveDisplayedPictures > 0;
+                        }
                         liveStopNeeded = false;
                         if (unexpectedStop) {
                             DebugLogger.log("VLC_LIVE", "Live stream stopped unexpectedly mid-session");
@@ -669,6 +697,8 @@ public class VlcPlayerManager {
                     liveListener = listener;
                     attachedLiveSurfaceView = surfaceView;
                     liveHasPlayed = false;
+                    liveHasVout = false;
+                    lastLiveRenderedVideo = false;
                     long now = SystemClock.uptimeMillis();
                     liveOpenStartUptimeMs = now;
                     lastLiveProgressUptimeMs = now;
@@ -728,6 +758,7 @@ public class VlcPlayerManager {
         liveSessionGen++;
         liveListener = null;
         liveHasPlayed = false;
+        liveHasVout = false;
         boolean needForceStop = liveStopNeeded;
         liveStopNeeded = false;
 

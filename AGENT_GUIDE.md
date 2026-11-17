@@ -130,8 +130,9 @@ ArrayList<String> options = VlcPlayerManager.buildEngineOptions(mirrorHorizontal
 `VlcPlayerManager` initializes **standard (`libVLC`) and horizontally-flipped (`mirrorLibVLC`) `LibVLC` instances asynchronously** off the main UI thread (`FitcamxVlcInit`) and applies per-media decoding options via `Media.addOption(...)`:
 - **Live Stream (`startLiveStream`):**
   - **Horizontal Mirroring Invariant:** In VLC 3.0, `vout_thread_t` inherits `"video-filter"` and `"transform-type"` from `libvlc_media_player_t` → `LibVLC`, **NOT** from `input_thread_t` (`Media.addOption`). Live horizontal mirroring therefore binds `mirrorLivePlayer` (`mirrorLibVLC` with `--video-filter=transform` + `--transform-type=hflip`), while unmirrored Live View and SD Gallery playback bind `livePlayer` / `galleryPlayer` (`libVLC`).
-  - Media options (`buildLiveMediaOptions`): `:rtsp-tcp`, `:network-caching=300`, `:ipv4-timeout=5000`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`, `:clock-jitter=0`, `:clock-synchro=0`.
-  - **Keepalive & Anti-Freeze Self-Healing:** `MainActivity` dispatches idle Novatek `cmd=3016` heartbeats every 15s (`CameraClient.sendKeepaliveIfIdle`), while `VlcPlayerManager` polls `IMedia.Stats` (`readBytes`, `demuxReadBytes`, `decodedVideo`, `displayedPictures` via `didLiveStatsAdvance`, always calling `media.release()` in `finally`) every `250ms` with a `1200ms` stall threshold. **Never** reset `lastLiveProgressUptimeMs` on `Event.TimeChanged` or `PositionChanged` — VLC's monotonic `input_clock_t` continues firing `TimeChanged` for 10s while `live555` receives 0 RTP packets! Tier-1 recovery (`attempt == 1`) reconnects RTSP silently after `50ms` (`~170ms` connect time) without flashing `pbLiveLoading` or `"CONNECTING..."`.
+  - Media options (`buildLiveMediaOptions`): `:rtsp-tcp`, `:network-caching=500`, `:ipv4-timeout=5000`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`, `:clock-jitter=0`, `:clock-synchro=0`.
+  - **Keepalive & Anti-Freeze Self-Healing:** `MainActivity` dispatches idle Novatek `cmd=3016` heartbeats every 15s (`CameraClient.sendKeepaliveIfIdle`), while `VlcPlayerManager` polls `IMedia.Stats` (`readBytes`, `demuxReadBytes`, `decodedVideo`, `displayedPictures` via `didLiveStatsAdvance`, always calling `media.release()` in `finally`) every `250ms` with a `1200ms` stall threshold and tracks real video decode/Vout output (`didLastLiveSessionRenderVideo()`). **Never** reset `lastLiveProgressUptimeMs` on `Event.TimeChanged` or `PositionChanged` — VLC's monotonic `input_clock_t` continues firing `TimeChanged` for 10s while `live555` receives 0 RTP packets! Tier-1 recovery (`attempt == 1`) reconnects RTSP silently after `50ms` (`~170ms` connect time) without flashing `pbLiveLoading` or `"CONNECTING..."`, and unrecovered `auto-refresh` loops cap at `MAX_LIVE_AUTO_RECONNECT_ATTEMPTS = 6`.
+  - **Single-ISP 4K Paused-Recording Live Preview Fallback:** Concurrent SD recording + RTSP live view (`cmd=2001&par=1`) remains the default. When a single-ISP 4K Novatek firmware starves RTSP whenever 4K recording runs (`2` consecutive post-connect stalls in `< 5000ms` or `0` rendered frames before `8000ms` health verification), `MainActivity` automatically switches to Paused-Recording 4K Live Preview (`prepareAndStartLiveView(..., resumeRecording = false)`), caches `cameraRequiresRecPauseFor4kLive` in RAM only for the current SSID session (zero `/data` writes), surfaces `○ REC PAUSED (4K LIVE)`, and guarantees `2200ms` bounded `cmd=2001&par=1` recording resumption on `1080P`, `VIEW_OEM_REAR`, `onStop`, and `Exit`.
   - *Note:* Live stream from Novatek is 720p/1080p H.264 (`rtsp://192.168.1.254/xxx.mov`), running smoothly with sub-second latency and automatic late-frame dropping if Wi-Fi jitters.
 - **1080p AVC Clips (`playGalleryClip` with `useKeyframeMode = false`):**
   - Always defaults to **1.0x full framerate** on each new clip, and allows cycling `1.0x` → `0.5x` → `0.33x` → `1.0x`.
@@ -153,7 +154,7 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 | **Movie Record Control** | `?custom=1&cmd=2001&par=0` | Stop Loop Recording | `<Function><Cmd>2001</Cmd><Status>0</Status></Function>` |
 | | `?custom=1&cmd=2001&par=1` | Start Loop Recording | `<Function><Cmd>2001</Cmd><Status>0</Status></Function>` |
 | | `?custom=1&cmd=2001&par=2` | Trigger Emergency Video Lock | Locks current clip segment to emergency folder |
-| **Resolution Selection** | `?custom=1&cmd=2002&par=0` | Set Resolution to 4K UHD | Front 3840x2160 / Rear 1080p |
+| **Resolution Selection** | `?custom=1&cmd=2002&par=0` | Set Resolution to 4K UHD | Front 3840x2160 / Rear 1080p (or index `6` on NT96670 firmwares) |
 | | `?custom=1&cmd=2002&par=1` | Set Resolution to 2K QHD | Front 2560x1440 / Rear 1080p |
 | | `?custom=1&cmd=2002&par=2` | Set Resolution to 1080p FHD | Front 1920x1080 / Rear 1080p |
 | **Microphone Control** | `?custom=1&cmd=2007&par=0` | Mute Microphone | Disables audio track in recordings |
@@ -163,7 +164,7 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 | **Emergency Lock** | `?custom=1&cmd=2011&par=3` | Protect current recording | Flags recording as locked |
 | **Live Stream Control** | `?custom=1&cmd=2015&par=0` / `par=1` | Stop / Start Live View | Enables or stops RTSP encoder output |
 | **Live Stream URL Query** | `?custom=1&cmd=2019` | Query Active RTSP URL | Returns `<MovieLiveViewLink>rtsp://192.168.1.254/xxx.mov</MovieLiveViewLink>` |
-| **Live Channel Switch** | `?custom=1&cmd=3028&par=0\|1\|2` | Switch Live Camera Feed | `0`=Front, `1`=Rear, `2`=Dual PiP (non-disruptive while recording) |
+| **Live Channel Switch** | `?custom=1&cmd=3028&par=0\|1\|2` | Switch Live Camera Feed | `0`=Front, `1`=Rear, `2`=Dual PiP (`-256` or absent in `cmd=3014` indicates front-only firmware even when `cmd=2002` index `>= 6`) |
 | **Camera Settings Sync** | `?custom=1&cmd=3014` | Query All Camera Settings | Returns XML list of current parameters |
 | **Set System Clock** | `?custom=1&cmd=3005&str=YYYY-MM-DD` + `cmd=3006&str=HH:MM:SS` | Sync RTC Date & Time | Sets camera internal clock to car clock |
 | **Directory Query** | `?custom=1&cmd=3015` | List Recorded Media on SD Card | Returns XML `<ALLFile>` index (`Movie`, `EMR`, `PHOTO`) |
@@ -171,7 +172,7 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 | **Firmware Info** | `?custom=1&cmd=3504` | Query Hardware / Firmware Info | Returns chipset and firmware string |
 
 ### RTSP Stream Endpoints
-- **Primary Dynamic Endpoint (via `cmd=2019`):** `rtsp://192.168.1.254/xxx.mov` (live camera channel selected via `cmd=3028&par=0|1|2`)
+- **Primary Dynamic Endpoint (via `cmd=2019`):** `rtsp://192.168.1.254/xxx.mov` (live camera channel selected via `cmd=3028&par=0|1|2` when supported; skipped once `-256` is observed)
 - **Fallback Candidate Endpoints:**
   - Front: `rtsp://192.168.1.254:554/264_pcm_rt/live.fhd`, `.../front.fhd`, `.../liveRTSP/v1`, `.../liveRTSP/av4`
   - Rear: `rtsp://192.168.1.254:554/264_pcm_rt/rear.fhd`, `.../rear.mov`, `.../liveRTSP/v2`, `.../liveRTSP/av2`

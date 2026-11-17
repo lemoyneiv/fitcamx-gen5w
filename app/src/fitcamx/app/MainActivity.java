@@ -169,6 +169,9 @@ public class MainActivity extends Activity {
     private static final long LIVE_KEEPALIVE_INTERVAL_MS = 15000L;
     private static final long LIVE_HEALTHY_RESET_MS = 8000L;
     private static final long LIVE_SILENT_REFRESH_SPINNER_DELAY_MS = 900L;
+    public static final long LIVE_4K_IMMEDIATE_STALL_WINDOW_MS = 5000L;
+    public static final int LIVE_4K_STALL_FALLBACK_THRESHOLD = 2;
+    public static final int MAX_LIVE_AUTO_RECONNECT_ATTEMPTS = 6;
     private static final String PREFS_UI_SETTINGS = "fitcamx_ui_settings";
 
     // State
@@ -196,6 +199,17 @@ public class MainActivity extends Activity {
     private Runnable pendingLiveRecoveryRunnable = null;
     private Runnable pendingSilentSpinnerRunnable = null;
     private boolean silentRefreshUiSuppressed = false;
+
+    // 4K Live Preview automatic paused-recording fallback (RAM-only per SSID session; zero flash wear)
+    private String liveProfileSsid = "";
+    private boolean cameraRequiresRecPauseFor4kLive = false;
+    private boolean verified4kConcurrentLiveCapable = false;
+    private boolean livePausedRecFor4kPreview = false;
+    private boolean userForced4kRecordingOverLive = false;
+    private boolean manualRecordingPausedByUser = false;
+    private boolean shown4kRecPauseNoticeForSession = false;
+    private int consecutiveImmediate4kStalls = 0;
+    private long livePlayingStartedUptimeMs = 0L;
 
     private boolean manualWifiSetupPending = false;
     private String lastFailedWifiSsid = null;
@@ -291,6 +305,19 @@ public class MainActivity extends Activity {
                     dismissActiveWifiDialog();
                     styleRescanButton();
                     galleryCacheDirty = true;
+                    String safeSsid = ssid != null ? ssid : "";
+                    if (!safeSsid.equals(liveProfileSsid)) {
+                        liveProfileSsid = safeSsid;
+                        cameraRequiresRecPauseFor4kLive = false;
+                        verified4kConcurrentLiveCapable = false;
+                        shown4kRecPauseNoticeForSession = false;
+                    }
+                    livePausedRecFor4kPreview = false;
+                    userForced4kRecordingOverLive = false;
+                    manualRecordingPausedByUser = false;
+                    consecutiveImmediate4kStalls = 0;
+                    liveAutoReconnectCount = 0;
+                    livePlayingStartedUptimeMs = 0L;
                     currentSsid = ssid;
                     currentDiagDetails = diagDetails;
                     loadKnownFitcamxRearForSsid(ssid);
@@ -328,8 +355,11 @@ public class MainActivity extends Activity {
                     isStartingLive = false;
                     isConnectingLiveVlc = false;
                     activeLiveStreamUrl = null;
+                    livePlayingStartedUptimeMs = 0L;
+                    livePausedRecFor4kPreview = false;
                     cancelLiveMaintenanceTimers();
                     liveRequestGeneration++;
+                    styleRecBadge();
                     addDiagLog("Wi-Fi disconnected");
                     if (tvWifiStatus != null) {
                         tvWifiStatus.setText("Disconnected");
@@ -401,7 +431,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         try {
-                            // 1. Check Movie Resolution (cmd=2002: 0=4K UHD, 1=1080P FHD)
+                            // 1. Check Movie Resolution (cmd=2002: 0/6=4K UHD, 1=1080P FHD)
                             Matcher m2002 = Pattern.compile("(?i)<Cmd>2002</Cmd>\\s*<Status>(\\d+)</Status>").matcher(xml);
                             if (m2002.find()) {
                                 int resStatus = Integer.parseInt(m2002.group(1));
@@ -429,9 +459,28 @@ public class MainActivity extends Activity {
                             if (m2001.find()) {
                                 int recStatus = Integer.parseInt(m2001.group(1));
                                 isRecording = (recStatus == 1);
-                                if (tvRecBadge != null) tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+                                if (isRecording) {
+                                    livePausedRecFor4kPreview = false;
+                                }
+                                styleRecBadge();
                                 styleRecordButton();
                                 DebugLogger.log("MAIN", "Synced camera rec status from firmware: " + (isRecording ? "RECORDING" : "STOPPED"));
+                            }
+
+                            // Reconcile if camera resolution differed from pre-sync assumption on reconnect
+                            boolean liveVisible = (layoutLiveMode != null && layoutLiveMode.getVisibility() == View.VISIBLE);
+                            if (is1080pMode && livePausedRecFor4kPreview && !manualRecordingPausedByUser) {
+                                livePausedRecFor4kPreview = false;
+                                if (isConnected && cameraClient != null) {
+                                    cameraClient.setRecording(true, null);
+                                    isRecording = true;
+                                    styleRecBadge();
+                                    styleRecordButton();
+                                }
+                            } else if (!is1080pMode && cameraRequiresRecPauseFor4kLive
+                                    && !livePausedRecFor4kPreview && !userForced4kRecordingOverLive
+                                    && liveVisible && targetViewMode != VIEW_OEM_REAR) {
+                                startLiveStream();
                             }
 
                             // 4. Infer rear Fitcamx channel from cmd=3014 status XML only when not yet known
@@ -792,17 +841,52 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 btnEmergencyLock.setEnabled(false);
+                final boolean pausesLiveOnSingleIsp4k = !is1080pMode && cameraRequiresRecPauseFor4kLive
+                        && targetViewMode != VIEW_OEM_REAR;
+                if (pausesLiveOnSingleIsp4k) {
+                    userForced4kRecordingOverLive = true;
+                    livePausedRecFor4kPreview = false;
+                    manualRecordingPausedByUser = false;
+                    cancelLiveMaintenanceTimers();
+                    isStartingLive = false;
+                    isConnectingLiveVlc = false;
+                    activeLiveStreamUrl = null;
+                    livePlayingStartedUptimeMs = 0L;
+                    liveRequestGeneration++;
+                    if (vlcPlayerManager != null) {
+                        vlcPlayerManager.stopLiveStream();
+                    }
+                    if (pbLiveLoading != null) {
+                        pbLiveLoading.setVisibility(View.GONE);
+                    }
+                }
                 cameraClient.emergencyLock(new CameraClient.Callback<Boolean>() {
                     @Override
                     public void onSuccess(Boolean result) {
                         btnEmergencyLock.setEnabled(true);
+                        isRecording = true;
+                        livePausedRecFor4kPreview = false;
+                        manualRecordingPausedByUser = false;
                         galleryCacheDirty = true;
+                        styleRecBadge();
+                        styleRecordButton();
+                        if (pausesLiveOnSingleIsp4k) {
+                            if (tvStreamBadge != null) {
+                                tvStreamBadge.setText(formatLiveStreamBadge(
+                                        getViewModeLabel(targetViewMode), isViewModeMirrored(targetViewMode), "4K REC LOCKED"));
+                            }
+                            if (tvDiagInfo != null) {
+                                tvDiagInfo.setText("Emergency 4K clip locked & recording (tap Stop Recording for Live View)");
+                            }
+                        }
                         addDiagLog("Emergency lock: current clip flagged in RO/Emergency folder");
                         Toast.makeText(MainActivity.this, "Current clip locked to Emergency folder", Toast.LENGTH_LONG).show();
                     }
                     @Override
                     public void onError(Exception error) {
                         btnEmergencyLock.setEnabled(true);
+                        styleRecBadge();
+                        styleRecordButton();
                         addDiagLog("Lock failed: " + error.getMessage());
                         Toast.makeText(MainActivity.this, "Lock failed: " + error.getMessage(), Toast.LENGTH_SHORT).show();
                     }
@@ -839,8 +923,47 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 final boolean targetRecState = !isRecording;
+                final boolean wasForced4kRec = userForced4kRecordingOverLive;
+
+                // Returning from user-forced 4K recording back to 4K Live Preview
+                if (!targetRecState && wasForced4kRec && !is1080pMode && cameraRequiresRecPauseFor4kLive
+                        && isConnected && layoutLiveMode != null && layoutLiveMode.getVisibility() == View.VISIBLE
+                        && targetViewMode != VIEW_OEM_REAR) {
+                    userForced4kRecordingOverLive = false;
+                    manualRecordingPausedByUser = false;
+                    livePausedRecFor4kPreview = true;
+                    liveAutoReconnectCount = 0;
+                    startLiveStream();
+                    return;
+                }
+
                 btnToggleRecord.setEnabled(false);
-                tvRecBadge.setVisibility(targetRecState ? View.VISIBLE : View.GONE);
+                if (targetRecState && !is1080pMode && cameraRequiresRecPauseFor4kLive
+                        && targetViewMode != VIEW_OEM_REAR) {
+                    userForced4kRecordingOverLive = true;
+                    livePausedRecFor4kPreview = false;
+                    manualRecordingPausedByUser = false;
+                    cancelLiveMaintenanceTimers();
+                    isStartingLive = false;
+                    isConnectingLiveVlc = false;
+                    activeLiveStreamUrl = null;
+                    livePlayingStartedUptimeMs = 0L;
+                    liveRequestGeneration++;
+                    if (vlcPlayerManager != null) {
+                        vlcPlayerManager.stopLiveStream();
+                    }
+                    if (pbLiveLoading != null) {
+                        pbLiveLoading.setVisibility(View.GONE);
+                    }
+                } else if (targetRecState) {
+                    userForced4kRecordingOverLive = false;
+                    livePausedRecFor4kPreview = false;
+                    manualRecordingPausedByUser = false;
+                } else {
+                    userForced4kRecordingOverLive = false;
+                    livePausedRecFor4kPreview = false;
+                    manualRecordingPausedByUser = true;
+                }
                 btnToggleRecord.setText(targetRecState ? "Stop Recording" : "Start Recording");
                 cameraClient.setRecording(targetRecState, new CameraClient.Callback<Boolean>() {
                     @Override
@@ -848,14 +971,26 @@ public class MainActivity extends Activity {
                         btnToggleRecord.setEnabled(true);
                         isRecording = targetRecState;
                         galleryCacheDirty = true;
-                        tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+                        styleRecBadge();
                         styleRecordButton();
+                        if (isRecording && userForced4kRecordingOverLive && targetViewMode != VIEW_OEM_REAR) {
+                            if (tvStreamBadge != null) {
+                                tvStreamBadge.setText(formatLiveStreamBadge(
+                                        getViewModeLabel(targetViewMode), isViewModeMirrored(targetViewMode), "4K REC ACTIVE"));
+                            }
+                            if (tvDiagInfo != null) {
+                                tvDiagInfo.setText("4K loop recording active (tap Stop Recording or switch to 1080P for Live View)");
+                            }
+                            Toast.makeText(MainActivity.this,
+                                    "4K recording resumed (tap Stop Recording or 1080P to view live feed)",
+                                    Toast.LENGTH_LONG).show();
+                        }
                         addDiagLog(isRecording ? "Loop recording resumed" : "Loop recording paused");
                     }
                     @Override
                     public void onError(Exception error) {
                         btnToggleRecord.setEnabled(true);
-                        tvRecBadge.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+                        styleRecBadge();
                         styleRecordButton();
                         addDiagLog("Recording toggle failed: " + error.getMessage());
                         Toast.makeText(MainActivity.this, "Recording toggle failed: " + error.getMessage(), Toast.LENGTH_SHORT).show();
@@ -890,14 +1025,51 @@ public class MainActivity extends Activity {
                     final boolean target1080p = !is1080pMode;
                     final int targetIndex = target1080p ? 1 : (camera4kIndex > 0 ? camera4kIndex : 0);
                     final String modeName = target1080p ? "1080P FHD" : "4K UHD";
+                    final boolean liveFitcamxVisible = isConnected
+                            && layoutLiveMode != null
+                            && layoutLiveMode.getVisibility() == View.VISIBLE
+                            && targetViewMode != VIEW_OEM_REAR;
+
                     btnCameraRes.setEnabled(false);
                     btnCameraRes.setText("Setting " + modeName + "...");
-                    cameraClient.setVideoResolution(targetIndex, new CameraClient.Callback<Boolean>() {
+
+                    // Stop LibVLC live stream cleanly BEFORE reconfiguring resolution so watchdog doesn't stall mid-CGI
+                    if (liveFitcamxVisible) {
+                        cancelLiveMaintenanceTimers();
+                        isStartingLive = false;
+                        isConnectingLiveVlc = false;
+                        activeLiveStreamUrl = null;
+                        livePlayingStartedUptimeMs = 0L;
+                        liveRequestGeneration++;
+                        if (vlcPlayerManager != null) {
+                            vlcPlayerManager.stopLiveStream();
+                        }
+                        if (pbLiveLoading != null) {
+                            pbLiveLoading.setVisibility(View.VISIBLE);
+                        }
+                    }
+
+                    cameraClient.setVideoResolution(targetIndex, liveFitcamxVisible, new CameraClient.Callback<Boolean>() {
                         @Override
                         public void onSuccess(Boolean result) {
                             btnCameraRes.setEnabled(true);
                             is1080pMode = target1080p;
                             galleryCacheDirty = true;
+                            consecutiveImmediate4kStalls = 0;
+                            liveAutoReconnectCount = 0;
+                            userForced4kRecordingOverLive = false;
+                            manualRecordingPausedByUser = false;
+                            if (is1080pMode) {
+                                livePausedRecFor4kPreview = false;
+                                if (!liveFitcamxVisible) {
+                                    isRecording = true;
+                                }
+                            } else if (!liveFitcamxVisible) {
+                                livePausedRecFor4kPreview = false;
+                                isRecording = true;
+                            }
+                            styleRecBadge();
+                            styleRecordButton();
                             btnCameraRes.setText("Rec: " + (is1080pMode ? "1080P" : "4K UHD"));
                             addDiagLog("Dashcam resolution set to " + modeName);
                             Toast.makeText(MainActivity.this, "Camera resolution set to " + modeName, Toast.LENGTH_LONG).show();
@@ -911,6 +1083,9 @@ public class MainActivity extends Activity {
                             btnCameraRes.setText("Rec: " + (is1080pMode ? "1080P" : "4K UHD"));
                             addDiagLog("Resolution change failed: " + error.getMessage());
                             Toast.makeText(MainActivity.this, "Resolution change: " + error.getMessage(), Toast.LENGTH_SHORT).show();
+                            if (liveFitcamxVisible) {
+                                startLiveStream();
+                            }
                         }
                     });
                 }
@@ -1225,6 +1400,38 @@ public class MainActivity extends Activity {
 
     public static boolean isSilentLiveRefresh(int attempt) {
         return attempt == 1;
+    }
+
+    /**
+     * Pure helper: returns true when a Live RTSP session in 4K Movie Mode stalled immediately
+     * after connecting while SD recording was active (either 0 video frames rendered, or the
+     * camera flushed <=5s of pre-recording ring-buffer frames before starving).
+     */
+    public static boolean isImmediate4kRecordingStall(boolean is1080pMode,
+                                                      boolean wasRecordingDuringLive,
+                                                      boolean verified4kConcurrentCapable,
+                                                      boolean renderedAnyVideo,
+                                                      long aliveSincePlayingMs) {
+        if (is1080pMode || !wasRecordingDuringLive || verified4kConcurrentCapable) {
+            return false;
+        }
+        return !renderedAnyVideo
+                || (aliveSincePlayingMs >= 0L && aliveSincePlayingMs < LIVE_4K_IMMEDIATE_STALL_WINDOW_MS);
+    }
+
+    /**
+     * Pure helper: determines whether Live View should automatically switch to Paused-Recording
+     * 4K Live Preview (matching official FITCAMX mobile behavior on single-ISP 4K Novatek firmwares).
+     */
+    public static boolean shouldFallbackToPaused4kLivePreview(boolean is1080pMode,
+                                                              boolean wasRecordingDuringLive,
+                                                              boolean verified4kConcurrentCapable,
+                                                              boolean alreadyRequiresPause,
+                                                              int consecutiveImmediateStalls) {
+        if (is1080pMode || !wasRecordingDuringLive || verified4kConcurrentCapable || alreadyRequiresPause) {
+            return false;
+        }
+        return consecutiveImmediateStalls >= LIVE_4K_STALL_FALLBACK_THRESHOLD;
     }
 
     /**
@@ -1580,7 +1787,10 @@ public class MainActivity extends Activity {
                     if (progress.isShowing()) progress.dismiss();
                 } catch (Exception ignored) {}
                 isRecording = true;
-                if (tvRecBadge != null) tvRecBadge.setVisibility(View.VISIBLE);
+                livePausedRecFor4kPreview = false;
+                userForced4kRecordingOverLive = false;
+                manualRecordingPausedByUser = false;
+                styleRecBadge();
                 styleRecordButton();
 
                 selectedClip = null;
@@ -1669,6 +1879,7 @@ public class MainActivity extends Activity {
         String msg = modeLabel + " live mirror: " + (nextMirrored ? "ON" : "OFF");
         addDiagLog(msg);
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+        String liveSuffix = livePausedRecFor4kPreview ? "4K PREVIEW" : "LIVE";
 
         // For OEM Backup Camera modes, apply orientation directly on OemRearView with zero RTSP restart!
         if (mode == VIEW_OEM_DUAL || mode == VIEW_OEM_REAR) {
@@ -1679,7 +1890,8 @@ public class MainActivity extends Activity {
                 tvOemPaneBadge.setText(nextMirrored ? "CAR BACKUP \u00B7 MIRROR" : "CAR BACKUP");
             }
             if (tvStreamBadge != null) {
-                tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, "LIVE"));
+                tvStreamBadge.setText(formatLiveStreamBadge(
+                        modeLabel, nextMirrored, mode == VIEW_OEM_REAR ? "LIVE" : liveSuffix));
             }
             return;
         }
@@ -1687,7 +1899,7 @@ public class MainActivity extends Activity {
         if (!isStartingLive && isLiveViewEligible(liveRequestGeneration)
                 && activeLiveStreamUrl != null && liveSurface != null && liveSurface.isValid()) {
             if (tvStreamBadge != null) {
-                tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, "LIVE"));
+                tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, liveSuffix));
             }
             List<String> singleFirst = new ArrayList<String>();
             singleFirst.add(activeLiveStreamUrl);
@@ -1698,7 +1910,8 @@ public class MainActivity extends Activity {
             final int reqGen = ++liveRequestGeneration;
             tryPlayVlcCandidate(singleFirst, 0, mode, reqGen, true);
         } else if (tvStreamBadge != null) {
-            tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, isConnected ? "LIVE" : "IDLE"));
+            String idleOrForced = userForced4kRecordingOverLive ? "4K REC ACTIVE" : (isConnected ? liveSuffix : "IDLE");
+            tvStreamBadge.setText(formatLiveStreamBadge(modeLabel, nextMirrored, idleOrForced));
         }
     }
 
@@ -1711,6 +1924,24 @@ public class MainActivity extends Activity {
         } else {
             ThemeManager.stylePillButton(this, btnToggleMic, p.surfaceContainerHigh, p.statusWarning,
                     Math.max(1, ThemeManager.dp(this, 1f)), p.outline, true);
+        }
+    }
+
+    private void styleRecBadge() {
+        if (tvRecBadge == null) return;
+        ThemeManager.Palette p = activePalette;
+        if (isRecording) {
+            tvRecBadge.setText("\u25CF REC");
+            ThemeManager.styleSurfaceCard(this, tvRecBadge, p.errorContainer, 999f, 0, 0);
+            tvRecBadge.setTextColor(p.onErrorContainer);
+            tvRecBadge.setVisibility(View.VISIBLE);
+        } else if (livePausedRecFor4kPreview && isConnected) {
+            tvRecBadge.setText("\u25CB REC PAUSED (4K LIVE)");
+            ThemeManager.styleSurfaceCard(this, tvRecBadge, p.tertiaryContainer, 999f, 0, 0);
+            tvRecBadge.setTextColor(p.onTertiaryContainer);
+            tvRecBadge.setVisibility(View.VISIBLE);
+        } else {
+            tvRecBadge.setVisibility(View.GONE);
         }
     }
 
@@ -1813,10 +2044,7 @@ public class MainActivity extends Activity {
         if (tvOemPaneBadge != null) {
             tvOemPaneBadge.setTextColor(ThemeManager.OVERLAY_TEXT_PRIMARY);
         }
-        ThemeManager.styleSurfaceCard(this, tvRecBadge, p.errorContainer, 999f, 0, 0);
-        if (tvRecBadge != null) {
-            tvRecBadge.setTextColor(p.onErrorContainer);
-        }
+        styleRecBadge();
         if (dividerLiveControls != null) {
             dividerLiveControls.setBackgroundColor(p.outlineVariant);
         }
@@ -1929,6 +2157,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Single camera configuration (Front only)", Toast.LENGTH_SHORT).show();
             return;
         }
+        liveAutoReconnectCount = 0;
         targetViewMode = getNextViewMode(targetViewMode, modes);
         updateViewModeUI();
         startLiveStream();
@@ -1952,7 +2181,8 @@ public class MainActivity extends Activity {
             public void onClick(DialogInterface dialog, int which) {
                 if (which < 0 || which >= modes.length) return;
                 int selectedMode = modes[which];
-                if (selectedMode != targetViewMode || selectedMode != activeStreamMode) {
+                liveAutoReconnectCount = 0;
+                if (selectedMode != targetViewMode || selectedMode != activeStreamMode || activeLiveStreamUrl == null) {
                     targetViewMode = selectedMode;
                     updateViewModeUI();
                     startLiveStream();
@@ -2285,8 +2515,12 @@ public class MainActivity extends Activity {
     private void switchTab(boolean showLive) {
         if (showLive) {
             galleryLoadGeneration++;
+            liveAutoReconnectCount = 0;
+            userForced4kRecordingOverLive = false;
+            manualRecordingPausedByUser = false;
             hideGallerySeekOverlay();
             clearPhotoPreview();
+            if (vlcPlayerManager != null) vlcPlayerManager.stopGalleryClip();
             ThemeManager.styleNavRailButton(this, btnTabLive, activePalette, getString(R.string.tab_live), true);
             ThemeManager.styleNavRailButton(this, btnTabGallery, activePalette, "SD Card", false);
             layoutLiveMode.setVisibility(View.VISIBLE);
@@ -2298,7 +2532,6 @@ public class MainActivity extends Activity {
             }
             applyLiveStageLayout(targetViewMode);
 
-            if (vlcPlayerManager != null) vlcPlayerManager.stopGalleryClip();
             if (targetViewMode == VIEW_OEM_REAR || targetViewMode == VIEW_OEM_DUAL
                     || (liveSurface != null && liveSurface.isValid())) {
                 startLiveStream();
@@ -2307,9 +2540,13 @@ public class MainActivity extends Activity {
             isStartingLive = false;
             isConnectingLiveVlc = false;
             activeLiveStreamUrl = null;
+            livePlayingStartedUptimeMs = 0L;
+            livePausedRecFor4kPreview = false;
+            userForced4kRecordingOverLive = false;
             cancelLiveMaintenanceTimers();
             liveRequestGeneration++;
             stopOemBackupStream();
+            if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
             ThemeManager.styleNavRailButton(this, btnTabLive, activePalette, getString(R.string.tab_live), false);
             ThemeManager.styleNavRailButton(this, btnTabGallery, activePalette, "SD Card", true);
             layoutLiveMode.setVisibility(View.GONE);
@@ -2332,7 +2569,6 @@ public class MainActivity extends Activity {
             }
             showGallerySeekOverlay(false);
 
-            if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
             loadGalleryClips(false);
             checkUsbStatus();
         }
@@ -2365,6 +2601,11 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             liveAutoReconnectCount = 0;
+            consecutiveImmediate4kStalls = 0;
+            if (!is1080pMode && isRecording && !livePausedRecFor4kPreview
+                    && vlcPlayerManager != null && vlcPlayerManager.didLastLiveSessionRenderVideo()) {
+                verified4kConcurrentLiveCapable = true;
+            }
         }
     };
 
@@ -2398,12 +2639,59 @@ public class MainActivity extends Activity {
         if (!isLiveViewEligible(reqGen)) return;
         activeLiveStreamUrl = null;
         cancelLiveMaintenanceTimers();
+
+        boolean renderedVideo = (vlcPlayerManager != null && vlcPlayerManager.didLastLiveSessionRenderVideo());
+        long aliveMs = (livePlayingStartedUptimeMs > 0L)
+                ? Math.max(0L, SystemClock.uptimeMillis() - livePlayingStartedUptimeMs)
+                : 0L;
+        livePlayingStartedUptimeMs = 0L;
+        boolean wasRecDuringLive = isRecording && !livePausedRecFor4kPreview;
+
+        if (isImmediate4kRecordingStall(is1080pMode, wasRecDuringLive,
+                verified4kConcurrentLiveCapable, renderedVideo, aliveMs)) {
+            consecutiveImmediate4kStalls++;
+            DebugLogger.log("PLAYER_RECOVER", "Immediate 4K concurrent-recording stall #"
+                    + consecutiveImmediate4kStalls + " (renderedVideo=" + renderedVideo + ", aliveMs=" + aliveMs + ")");
+            if (shouldFallbackToPaused4kLivePreview(is1080pMode, wasRecDuringLive,
+                    verified4kConcurrentLiveCapable, cameraRequiresRecPauseFor4kLive,
+                    consecutiveImmediate4kStalls)) {
+                cameraRequiresRecPauseFor4kLive = true;
+                consecutiveImmediate4kStalls = 0;
+                liveAutoReconnectCount = 0;
+                String fbMsg = "4K camera requires pausing recording during Live View \u2014 switching to 4K Live Preview (auto-resumes on exit)";
+                addDiagLog(fbMsg);
+                DebugLogger.log("PLAYER_RECOVER", fbMsg);
+                startLiveStream();
+                return;
+            }
+        } else {
+            consecutiveImmediate4kStalls = 0;
+        }
+
         liveAutoReconnectCount++;
         final int attempt = liveAutoReconnectCount;
+        if (attempt > MAX_LIVE_AUTO_RECONNECT_ATTEMPTS) {
+            if (pbLiveLoading != null) {
+                pbLiveLoading.setVisibility(View.GONE);
+            }
+            if (tvStreamBadge != null) {
+                tvStreamBadge.setText(formatLiveStreamBadge(
+                        getViewModeLabel(streamMode), isViewModeMirrored(streamMode), "STREAM PAUSED"));
+            }
+            String capMsg = "Live feed paused after " + MAX_LIVE_AUTO_RECONNECT_ATTEMPTS
+                    + " retries (" + reason + "). Tap View or Rescan to retry.";
+            addDiagLog(capMsg);
+            DebugLogger.log("PLAYER_RECOVER", capMsg);
+            if (tvDiagInfo != null) {
+                tvDiagInfo.setText(capMsg);
+            }
+            return;
+        }
+
         final boolean silentRefresh = isSilentLiveRefresh(attempt);
         long delayMs = computeLiveRecoveryDelayMs(attempt);
 
-        String recoverMsg = "Live feed stalled (" + reason + ") — auto-refresh #" + attempt;
+        String recoverMsg = "Live feed stalled (" + reason + ") \u2014 auto-refresh #" + attempt;
         addDiagLog(recoverMsg);
         DebugLogger.log("PLAYER_RECOVER", recoverMsg + " in " + delayMs + "ms"
                 + (silentRefresh ? " [silent]" : ""));
@@ -2424,7 +2712,8 @@ public class MainActivity extends Activity {
                 } else if (attempt == 2 && cameraClient != null) {
                     // Tier 2: Non-disruptive CGI channel/liveview nudge + RTSP reconnect
                     int fitcamxCh = (streamMode == VIEW_OEM_DUAL) ? CameraClient.VIEW_FRONT : streamMode;
-                    cameraClient.nudgeLiveEncoder(fitcamxCh, new CameraClient.Callback<List<String>>() {
+                    boolean resumeRec = !livePausedRecFor4kPreview && !manualRecordingPausedByUser;
+                    cameraClient.nudgeLiveEncoder(fitcamxCh, resumeRec, new CameraClient.Callback<List<String>>() {
                         @Override
                         public void onSuccess(final List<String> refreshedUrls) {
                             runOnUiThread(new Runnable() {
@@ -2473,6 +2762,9 @@ public class MainActivity extends Activity {
         if (modeToStart == VIEW_OEM_REAR) {
             cancelLiveMaintenanceTimers();
             activeLiveStreamUrl = null;
+            livePlayingStartedUptimeMs = 0L;
+            livePausedRecFor4kPreview = false;
+            userForced4kRecordingOverLive = false;
             isStartingLive = false;
             isConnectingLiveVlc = false;
             liveRequestGeneration++;
@@ -2491,12 +2783,13 @@ public class MainActivity extends Activity {
                 tvStreamBadge.setText(formatLiveStreamBadge(
                         getViewModeLabel(VIEW_OEM_REAR), isViewModeMirrored(VIEW_OEM_REAR), "CONNECTING..."));
             }
-            if (isConnected && cameraClient != null) {
+            if (isConnected && cameraClient != null && !isRecording && !manualRecordingPausedByUser) {
+                cameraClient.stopLiveView();
                 cameraClient.setRecording(true, null);
                 isRecording = true;
-                if (tvRecBadge != null) tvRecBadge.setVisibility(View.VISIBLE);
-                styleRecordButton();
             }
+            styleRecBadge();
+            styleRecordButton();
             startOemBackupStream(VIEW_OEM_REAR);
             return;
         }
@@ -2524,6 +2817,30 @@ public class MainActivity extends Activity {
             }
         }
 
+        // Respect manual user override when 4K recording was explicitly forced over Live Preview
+        if (userForced4kRecordingOverLive && !is1080pMode && cameraRequiresRecPauseFor4kLive) {
+            cancelLiveMaintenanceTimers();
+            activeLiveStreamUrl = null;
+            livePlayingStartedUptimeMs = 0L;
+            isStartingLive = false;
+            isConnectingLiveVlc = false;
+            activeStreamMode = modeToStart;
+            currentViewMode = modeToStart;
+            if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
+            if (pbLiveLoading != null) pbLiveLoading.setVisibility(View.GONE);
+            styleRecBadge();
+            styleRecordButton();
+            if (tvStreamBadge != null) {
+                tvStreamBadge.setText(formatLiveStreamBadge(
+                        getViewModeLabel(modeToStart), isViewModeMirrored(modeToStart), "4K REC ACTIVE"));
+            }
+            if (tvDiagInfo != null) {
+                tvDiagInfo.setText("4K loop recording active (tap Stop Recording or switch to 1080P for Live View)");
+            }
+            updateViewModeUI();
+            return;
+        }
+
         // Fast zero-frame-drop transition between VIEW_FRONT and VIEW_OEM_DUAL when Front RTSP is already playing!
         if (!isStartingLive && activeLiveStreamUrl != null
                 && liveSurface != null && liveSurface.isValid()
@@ -2533,8 +2850,9 @@ public class MainActivity extends Activity {
             currentViewMode = modeToStart;
             if (pbLiveLoading != null) pbLiveLoading.setVisibility(View.GONE);
             if (tvStreamBadge != null) {
+                String fastSuffix = livePausedRecFor4kPreview ? "4K PREVIEW" : "LIVE";
                 tvStreamBadge.setText(formatLiveStreamBadge(
-                        getViewModeLabel(modeToStart), isViewModeMirrored(modeToStart), "LIVE"));
+                        getViewModeLabel(modeToStart), isViewModeMirrored(modeToStart), fastSuffix));
             }
             updateViewModeUI();
             return;
@@ -2555,8 +2873,11 @@ public class MainActivity extends Activity {
 
         cancelLiveMaintenanceTimers();
         activeLiveStreamUrl = null;
+        livePlayingStartedUptimeMs = 0L;
         isConnectingLiveVlc = false;
         final int fitcamxChannel = (modeToStart == VIEW_OEM_DUAL) ? CameraClient.VIEW_FRONT : modeToStart;
+        final boolean pauseFor4kPreview = !is1080pMode && cameraRequiresRecPauseFor4kLive && !userForced4kRecordingOverLive;
+        final boolean resumeRecDuringLive = !pauseFor4kPreview && !manualRecordingPausedByUser;
         final int reqGen = ++liveRequestGeneration;
         currentViewMode = modeToStart;
         isStartingLive = true;
@@ -2564,13 +2885,15 @@ public class MainActivity extends Activity {
         if (vlcPlayerManager != null) vlcPlayerManager.stopLiveStream();
 
         updateViewModeUI();
-        String prepMsg = "Initializing " + getViewModeLabel(modeToStart) + " feed...";
+        String prepMsg = pauseFor4kPreview
+                ? ("Initializing " + getViewModeLabel(modeToStart) + " 4K Live Preview...")
+                : ("Initializing " + getViewModeLabel(modeToStart) + " feed...");
         addDiagLog(prepMsg);
         if (tvDiagInfo != null) tvDiagInfo.setText(prepMsg);
         tvStreamBadge.setText(formatLiveStreamBadge(
                 getViewModeLabel(modeToStart), isViewModeMirrored(modeToStart), "CONNECTING..."));
 
-        cameraClient.prepareAndStartLiveView(fitcamxChannel, new CameraClient.Callback<List<String>>() {
+        cameraClient.prepareAndStartLiveView(fitcamxChannel, resumeRecDuringLive, new CameraClient.Callback<List<String>>() {
             @Override
             public void onSuccess(final List<String> candidates) {
                 runOnUiThread(new Runnable() {
@@ -2583,9 +2906,16 @@ public class MainActivity extends Activity {
                             return;
                         }
                         isStartingLive = false;
-                        isRecording = true;
-                        if (tvRecBadge != null) tvRecBadge.setVisibility(View.VISIBLE);
+                        isRecording = resumeRecDuringLive;
+                        livePausedRecFor4kPreview = pauseFor4kPreview;
+                        styleRecBadge();
                         styleRecordButton();
+                        if (pauseFor4kPreview && !shown4kRecPauseNoticeForSession) {
+                            shown4kRecPauseNoticeForSession = true;
+                            Toast.makeText(MainActivity.this,
+                                    "4K recording paused during Live View \u2014 resumes automatically on exit",
+                                    Toast.LENGTH_LONG).show();
+                        }
 
                         // If user queued a different view mode while camera was switching, switch immediately!
                         if (targetViewMode != modeToStart) {
@@ -2719,20 +3049,27 @@ public class MainActivity extends Activity {
                             return;
                         }
                         isConnectingLiveVlc = false;
+                        livePlayingStartedUptimeMs = SystemClock.uptimeMillis();
                         activeStreamMode = streamMode;
                         currentViewMode = streamMode;
                         activeLiveStreamUrl = currentUrl;
                         pbLiveLoading.setVisibility(View.GONE);
+                        String liveSuffix = livePausedRecFor4kPreview ? "4K PREVIEW" : "LIVE";
                         String badge = formatLiveStreamBadge(
-                                getViewModeLabel(streamMode), isViewModeMirrored(streamMode), "LIVE");
+                                getViewModeLabel(streamMode), isViewModeMirrored(streamMode), liveSuffix);
                         tvStreamBadge.setText(badge);
                         updateViewModeUI();
                         scheduleLiveMaintenanceTimers();
-                        String activeMsg = "Live feed active via LibVLC: " + currentUrl;
+                        String activeMsg = "Live feed active via LibVLC: " + currentUrl
+                                + (livePausedRecFor4kPreview ? " [4K recording paused]" : "");
                         addDiagLog(activeMsg);
                         DebugLogger.log("PLAYER", activeMsg);
                         if (tvDiagInfo != null) {
-                            tvDiagInfo.setText("Live Feed: " + badge + " on " + cameraClient.getCameraIp());
+                            if (livePausedRecFor4kPreview) {
+                                tvDiagInfo.setText("4K Live Preview active (recording paused \u2014 resumes automatically on exit)");
+                            } else {
+                                tvDiagInfo.setText("Live Feed: " + badge + " on " + cameraClient.getCameraIp());
+                            }
                         }
 
                         // If user selected another mode while stream was connecting, proceed to next mode
@@ -4002,6 +4339,12 @@ public class MainActivity extends Activity {
         isActivityVisible = true;
         lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
         if (isExiting) return;
+        if (cameraClient != null) {
+            cameraClient.clearTeardownFlag();
+        }
+        userForced4kRecordingOverLive = false;
+        manualRecordingPausedByUser = false;
+        liveAutoReconnectCount = 0;
         if (!HmgapidClient.isRootServiceCachedAvailable()) {
             HmgapidClient.probeRootServiceAsync();
         }
@@ -4032,6 +4375,7 @@ public class MainActivity extends Activity {
         isStartingLive = false;
         isConnectingLiveVlc = false;
         activeLiveStreamUrl = null;
+        livePlayingStartedUptimeMs = 0L;
         cancelLiveMaintenanceTimers();
         liveRequestGeneration++;
         lifecycleHandler.removeCallbacks(hideSeekOverlayRunnable);
@@ -4048,16 +4392,21 @@ public class MainActivity extends Activity {
         boolean inGallery = (layoutGalleryMode != null && layoutGalleryMode.getVisibility() == View.VISIBLE);
         boolean activeUsbTransfer = (usbDownloader != null && usbDownloader.isDownloading());
         if (isConnected && cameraClient != null && !activeUsbTransfer && (inGallery || !isRecording)) {
+            livePausedRecFor4kPreview = false;
+            userForced4kRecordingOverLive = false;
+            manualRecordingPausedByUser = false;
             cameraClient.ensureRecordingBeforeTeardown(new Runnable() {
                 @Override
                 public void run() {
                     isRecording = true;
+                    styleRecBadge();
+                    styleRecordButton();
                     if (!isActivityVisible && !isExiting) {
                         lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
                         lifecycleHandler.postDelayed(backgroundSuspendRunnable, 1200L);
                     }
                 }
-            }, 1000L);
+            }, 2200L);
         } else {
             lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
             lifecycleHandler.postDelayed(backgroundSuspendRunnable, 1500L);
@@ -4131,7 +4480,7 @@ public class MainActivity extends Activity {
         };
 
         if (isConnected && cameraClient != null) {
-            cameraClient.ensureRecordingBeforeTeardown(finishRebootTeardown, 1200L);
+            cameraClient.ensureRecordingBeforeTeardown(finishRebootTeardown, 2200L);
         } else {
             finishRebootTeardown.run();
         }
@@ -4202,7 +4551,7 @@ public class MainActivity extends Activity {
         };
 
         if (isConnected && cameraClient != null) {
-            cameraClient.ensureRecordingBeforeTeardown(finishStandardTeardown, 1200L);
+            cameraClient.ensureRecordingBeforeTeardown(finishStandardTeardown, 2200L);
         } else {
             finishStandardTeardown.run();
         }

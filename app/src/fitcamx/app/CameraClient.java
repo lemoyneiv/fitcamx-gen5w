@@ -56,6 +56,8 @@ public class CameraClient {
     public static final long KEEPALIVE_MIN_IDLE_MS = 12000L;
     private volatile int knownCameraMode = -1; // -1=unknown, 1=Movie, 2=Playback
     private volatile String cachedDynamicRtspUrl = null;
+    private volatile boolean liveRecordingActive = true;
+    private volatile boolean supportsChannelSelect3028 = true;
     private volatile boolean teardownActive = false;
     private volatile HttpURLConnection activeConnection = null;
     private volatile long lastCgiActivityUptimeMs = 0L;
@@ -88,10 +90,16 @@ public class CameraClient {
         executor.shutdownNow();
     }
 
+    public void clearTeardownFlag() {
+        teardownActive = false;
+    }
+
     public void resetSessionState() {
         teardownActive = false;
         knownCameraMode = -1;
         cachedDynamicRtspUrl = null;
+        liveRecordingActive = true;
+        supportsChannelSelect3028 = true;
         lastCgiActivityUptimeMs = 0L;
     }
 
@@ -323,32 +331,52 @@ public class CameraClient {
      * - Caches cmd=2019 dynamic RTSP URL per session to eliminate redundant queries & sleep delays.
      */
     public void prepareAndStartLiveView(final int viewMode, final Callback<List<String>> callback) {
+        prepareAndStartLiveView(viewMode, true, callback);
+    }
+
+    public void prepareAndStartLiveView(final int viewMode, final boolean resumeRecording,
+                                        final Callback<List<String>> callback) {
         runAsync(new Runnable() {
             @Override
             public void run() {
                 if (teardownActive) return;
                 String modeName = (viewMode == VIEW_FRONT) ? "FRONT" : (viewMode == VIEW_REAR ? "REAR" : "DUAL (BOTH)");
-                DebugLogger.log("CAM_LIVE", "Preparing live view for " + modeName + " camera (viewMode=" + viewMode + ") on " + cameraIp);
+                DebugLogger.log("CAM_LIVE", "Preparing live view for " + modeName
+                        + " camera (viewMode=" + viewMode + ", resumeRec=" + resumeRecording + ") on " + cameraIp);
                 try {
                     boolean switchedFast = false;
 
-                    // Fast PIP channel switch when already in Movie Mode with cached RTSP stream active
-                    if (socType == SocType.NOVATEK && knownCameraMode == 1 && cachedDynamicRtspUrl != null) {
+                    // Fast PIP channel switch when already in Movie Mode with matching recording state & supported cmd=3028
+                    if (socType == SocType.NOVATEK && knownCameraMode == 1 && cachedDynamicRtspUrl != null
+                            && supportsChannelSelect3028 && (resumeRecording == liveRecordingActive)) {
                         try {
                             String rFast3028 = sendCgiCommand("3028", String.valueOf(viewMode));
                             if (isCgiStatusOk(rFast3028)) {
                                 switchedFast = true;
                                 DebugLogger.log("CAM_LIVE", "Fast non-disruptive channel switch succeeded for " + modeName);
+                            } else if (parseCgiStatus(rFast3028) == -256) {
+                                supportsChannelSelect3028 = false;
                             }
                         } catch (Exception ignored) {}
                     }
 
                     if (!switchedFast) {
                         if (teardownActive) return;
-                        // 1. Stop active recording (cmd=2001&par=0) - mandatory on NT96675 before starting liveview encoder
+                        // 1. Stop active recording (cmd=2001&par=0) - mandatory on NT966xx before starting liveview encoder
                         try {
                             String r2001 = sendCgiCommand("2001", "0");
                             DebugLogger.log("CAM_LIVE", "cmd=2001&par=0 (Stop rec) response: " + (r2001 != null ? r2001.trim() : "null"));
+                            int st2001 = parseCgiStatus(r2001);
+                            if (st2001 == -13 && !teardownActive) {
+                                // Segment just opened (<1.5s); wait briefly and retry stop-recording cleanly
+                                Thread.sleep(350);
+                                r2001 = sendCgiCommand("2001", "0");
+                                DebugLogger.log("CAM_LIVE", "Retry cmd=2001&par=0 response: " + (r2001 != null ? r2001.trim() : "null"));
+                                st2001 = parseCgiStatus(r2001);
+                            }
+                            if (isCgiStatusOk(r2001) || st2001 == -22) {
+                                liveRecordingActive = false;
+                            }
                         } catch (Exception e) {
                             DebugLogger.log("CAM_LIVE", "cmd=2001&par=0 failed: " + e.getMessage());
                         }
@@ -375,12 +403,17 @@ public class CameraClient {
                         }
 
                         if (teardownActive) return;
-                        // 4. Switch hardware channel (cmd=3028: 0=front, 1=rear, 2=dual)
-                        try {
-                            String r3028 = sendCgiCommand("3028", String.valueOf(viewMode));
-                            DebugLogger.log("CAM_LIVE", "cmd=3028&par=" + viewMode + " (" + modeName + " select) response: " + (r3028 != null ? r3028.trim() : "null"));
-                        } catch (Exception e) {
-                            DebugLogger.log("CAM_LIVE", "cmd=3028 failed: " + e.getMessage());
+                        // 4. Switch hardware channel (cmd=3028: 0=front, 1=rear, 2=dual) when firmware supports it
+                        if (supportsChannelSelect3028) {
+                            try {
+                                String r3028 = sendCgiCommand("3028", String.valueOf(viewMode));
+                                DebugLogger.log("CAM_LIVE", "cmd=3028&par=" + viewMode + " (" + modeName + " select) response: " + (r3028 != null ? r3028.trim() : "null"));
+                                if (parseCgiStatus(r3028) == -256) {
+                                    supportsChannelSelect3028 = false;
+                                }
+                            } catch (Exception e) {
+                                DebugLogger.log("CAM_LIVE", "cmd=3028 failed: " + e.getMessage());
+                            }
                         }
 
                         if (teardownActive) return;
@@ -397,7 +430,10 @@ public class CameraClient {
                         if (r2015 != null && parseCgiStatus(r2015) == -13 && !teardownActive) {
                             DebugLogger.log("CAM_LIVE", "Liveview start returned -13, re-stopping recording and retrying...");
                             Thread.sleep(200);
-                            sendCgiCommand("2001", "0");
+                            String rStopRetry = sendCgiCommand("2001", "0");
+                            if (isCgiStatusOk(rStopRetry) || parseCgiStatus(rStopRetry) == -22) {
+                                liveRecordingActive = false;
+                            }
                             Thread.sleep(120);
                             sendCgiCommand("3001", "1");
                             Thread.sleep(120);
@@ -422,16 +458,22 @@ public class CameraClient {
                         }
 
                         if (teardownActive) return;
-                        // 7. Resume continuous SD card loop recording (cmd=2001&par=1)
-                        try {
-                            Thread.sleep(40);
-                            String rRec = sendCgiCommand("2001", "1");
-                            DebugLogger.log("CAM_LIVE", "cmd=2001&par=1 (Resume recording) response: " + (rRec != null ? rRec.trim() : "null"));
-                            if (isCgiStatusOk(rRec)) {
-                                knownCameraMode = 1;
+                        // 7. Resume continuous SD card loop recording (cmd=2001&par=1) unless paused for 4K Live Preview
+                        if (resumeRecording) {
+                            try {
+                                Thread.sleep(40);
+                                String rRec = sendCgiCommand("2001", "1");
+                                DebugLogger.log("CAM_LIVE", "cmd=2001&par=1 (Resume recording) response: " + (rRec != null ? rRec.trim() : "null"));
+                                if (isCgiStatusOk(rRec) || parseCgiStatus(rRec) == -22) {
+                                    knownCameraMode = 1;
+                                    liveRecordingActive = true;
+                                }
+                            } catch (Exception e) {
+                                DebugLogger.log("CAM_LIVE", "cmd=2001&par=1 failed: " + e.getMessage());
                             }
-                        } catch (Exception e) {
-                            DebugLogger.log("CAM_LIVE", "cmd=2001&par=1 failed: " + e.getMessage());
+                        } else {
+                            liveRecordingActive = false;
+                            DebugLogger.log("CAM_LIVE", "Keeping loop recording paused for live preview");
                         }
                     }
 
@@ -453,32 +495,54 @@ public class CameraClient {
     }
 
     public void prepareAndStartLiveView(final boolean front, final Callback<List<String>> callback) {
-        prepareAndStartLiveView(front ? VIEW_FRONT : VIEW_REAR, callback);
+        prepareAndStartLiveView(front ? VIEW_FRONT : VIEW_REAR, true, callback);
     }
 
     /**
      * Non-disruptive liveview encoder nudge used when an RTSP stream stalls mid-session:
      * re-asserts channel selection (cmd=3028) and liveview push (cmd=2015&par=1) WITHOUT
-     * stopping SD card loop recording unless the firmware explicitly requires it (-13).
+     * stopping SD card loop recording unless the firmware explicitly requires it (-13),
+     * and preserves paused-recording state when resumeRecording is false.
      */
     public void nudgeLiveEncoder(final int viewMode, final Callback<List<String>> callback) {
+        nudgeLiveEncoder(viewMode, true, callback);
+    }
+
+    public void nudgeLiveEncoder(final int viewMode, final boolean resumeRecording,
+                                 final Callback<List<String>> callback) {
         runAsync(new Runnable() {
             @Override
             public void run() {
                 if (teardownActive) return;
                 try {
                     if (socType == SocType.NOVATEK) {
+                        if (supportsChannelSelect3028) {
+                            try {
+                                String r3028 = sendCgiCommand("3028", String.valueOf(viewMode), 2500);
+                                if (parseCgiStatus(r3028) == -256) {
+                                    supportsChannelSelect3028 = false;
+                                }
+                            } catch (Exception ignored) {}
+                        }
                         try {
-                            sendCgiCommand("3028", String.valueOf(viewMode), 2500);
-                        } catch (Exception ignored) {}
-                        try {
+                            if (!resumeRecording && liveRecordingActive) {
+                                sendCgiCommand("2001", "0", 2500);
+                                liveRecordingActive = false;
+                                Thread.sleep(80);
+                            }
                             String r2015 = sendCgiCommand("2015", "1", 2500);
                             if (r2015 != null && parseCgiStatus(r2015) == -13 && !teardownActive) {
                                 sendCgiCommand("2001", "0", 2500);
+                                liveRecordingActive = false;
                                 Thread.sleep(80);
                                 sendCgiCommand("2015", "1", 2500);
-                                Thread.sleep(60);
-                                sendCgiCommand("2001", "1", 2500);
+                                if (resumeRecording) {
+                                    Thread.sleep(60);
+                                    String rRec = sendCgiCommand("2001", "1", 2500);
+                                    if (isCgiStatusOk(rRec) || parseCgiStatus(rRec) == -22) {
+                                        liveRecordingActive = true;
+                                    }
+                                }
                             }
                         } catch (Exception ignored) {}
                     }
@@ -524,7 +588,14 @@ public class CameraClient {
                     if (knownCameraMode != 2) {
                         // Stop recording BEFORE stopping liveview (avoids 980ms Status -13 stall on NT966xx)
                         try {
-                            sendCgiCommand("2001", "0");
+                            String rStop = sendCgiCommand("2001", "0");
+                            if (parseCgiStatus(rStop) == -13 && !teardownActive) {
+                                Thread.sleep(350);
+                                rStop = sendCgiCommand("2001", "0");
+                            }
+                            if (isCgiStatusOk(rStop) || parseCgiStatus(rStop) == -22) {
+                                liveRecordingActive = false;
+                            }
                         } catch (Exception ignored) {}
                         if (teardownActive) return;
                         try {
@@ -534,6 +605,7 @@ public class CameraClient {
                         String r3001 = sendCgiCommand("3001", "2");
                         if (isCgiStatusOk(r3001)) {
                             knownCameraMode = 2;
+                            liveRecordingActive = false;
                         }
                     }
                     postSuccess(callback, true);
@@ -558,7 +630,14 @@ public class CameraClient {
                 try {
                     // 1. Stop recording FIRST (cmd=2001&par=0) so cmd=2015&par=0 does not stall with Status -13
                     try {
-                        sendCgiCommand("2001", "0");
+                        String rStop = sendCgiCommand("2001", "0");
+                        if (parseCgiStatus(rStop) == -13 && !teardownActive) {
+                            Thread.sleep(350);
+                            rStop = sendCgiCommand("2001", "0");
+                        }
+                        if (isCgiStatusOk(rStop) || parseCgiStatus(rStop) == -22) {
+                            liveRecordingActive = false;
+                        }
                         diagLog.append("Stop rec ok; ");
                     } catch (Exception e) {
                         diagLog.append("Stop rec err: ").append(e.getMessage()).append("; ");
@@ -576,6 +655,7 @@ public class CameraClient {
                         String r3001 = sendCgiCommand("3001", "2");
                         if (isCgiStatusOk(r3001)) {
                             knownCameraMode = 2;
+                            liveRecordingActive = false;
                         }
                         diagLog.append("Set playback mode ok; ");
                     } catch (Exception e) {
@@ -705,8 +785,9 @@ public class CameraClient {
     /**
      * Infers whether a physical rear Fitcamx camera channel is present directly from Novatek
      * cmd=3014 status XML when unambiguous:
-     * - <Cmd>2002</Cmd><Status>N</Status> with N >= 6 (MOVIE_SIZE_DUAL_*) -> Boolean.TRUE
-     * - Valid status XML (<Cmd>2002</Cmd> present) with <Cmd>3028</Cmd> absent -> Boolean.FALSE
+     * - Valid status XML (<Cmd>2002</Cmd> present) with <Cmd>3028</Cmd> absent or <Status>-256</Status> -> Boolean.FALSE
+     *   (checked FIRST because single-channel 4K NT96670 firmwares also use resolution index 6 for 4K UHD!)
+     * - <Cmd>2002</Cmd><Status>N</Status> with N >= 6 when <Cmd>3028</Cmd> is supported -> Boolean.TRUE
      * - Otherwise -> null (requires directory or cmd=3028 probe).
      */
     public static Boolean inferRearChannelFromStatusXml(String statusXml) {
@@ -715,6 +796,20 @@ public class CameraClient {
         if (!m2002.find()) {
             return null;
         }
+
+        Matcher m3028 = Pattern.compile("(?i)<Cmd>\\s*3028\\s*</Cmd>(?:\\s*<Status>\\s*(-?\\d+)\\s*</Status>)?").matcher(statusXml);
+        if (!m3028.find()) {
+            return Boolean.FALSE;
+        }
+        String st3028 = m3028.group(1);
+        if (st3028 != null) {
+            try {
+                if (Integer.parseInt(st3028) == -256) {
+                    return Boolean.FALSE;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
         try {
             int resIdx = Integer.parseInt(m2002.group(1));
             if (resIdx >= 6) {
@@ -722,10 +817,6 @@ public class CameraClient {
             }
         } catch (NumberFormatException ignored) {}
 
-        Matcher m3028 = Pattern.compile("(?i)<Cmd>\\s*3028\\s*</Cmd>").matcher(statusXml);
-        if (!m3028.find()) {
-            return Boolean.FALSE;
-        }
         return null;
     }
 
@@ -807,13 +898,18 @@ public class CameraClient {
                 if (detected == null && !teardownActive && socType == SocType.NOVATEK) {
                     try {
                         String rRear = sendCgiCommand("3028", "1", 1500);
-                        try {
-                            sendCgiCommand("3028", "0", 1500);
-                        } catch (Exception ignored) {}
+                        int stRear = parseCgiStatus(rRear);
+                        if (stRear == -256) {
+                            supportsChannelSelect3028 = false;
+                        } else {
+                            try {
+                                sendCgiCommand("3028", "0", 1500);
+                            } catch (Exception ignored) {}
+                        }
                         if (rRear != null && !rRear.isEmpty()) {
                             detected = Boolean.valueOf(isCgiStatusOk(rRear));
                             DebugLogger.log("CAM_PROBE", "Fitcamx rear channel probe via cmd=3028&par=1 -> "
-                                    + detected + " (status=" + parseCgiStatus(rRear) + ")");
+                                    + detected + " (status=" + stRear + ")");
                         }
                     } catch (Exception ignored) {}
                 }
@@ -839,12 +935,21 @@ public class CameraClient {
                         } catch (Exception ignored) {}
                     }
                     String resp = sendCgiCommand("2001", start ? "1" : "0");
+                    int st = parseCgiStatus(resp);
+                    if (!start && st == -13 && !teardownActive) {
+                        Thread.sleep(350);
+                        resp = sendCgiCommand("2001", "0");
+                        st = parseCgiStatus(resp);
+                    }
                     if (!isCgiStatusOk(resp)) {
-                        int st = parseCgiStatus(resp);
                         // On Novatek, stopping an already-stopped stream or starting an already-running stream may return -22; verify actual state
                         if (st != -22) {
                             throw new Exception("Camera rejected recording toggle (status=" + st + ")");
                         }
+                    }
+                    liveRecordingActive = start;
+                    if (start) {
+                        knownCameraMode = 1;
                     }
                     postSuccess(callback, true);
                 } catch (Exception e) {
@@ -873,7 +978,11 @@ public class CameraClient {
             }
         };
 
-        mainHandler.postDelayed(finishOnce, Math.max(250L, maxWaitMs));
+        final long boundedWaitMs = Math.max(250L, maxWaitMs);
+        final int connectTimeoutMs = (int) Math.min(700L, boundedWaitMs);
+        // Opening a 4K .TS segment on NT966xx takes ~1.35s; allow up to 2000ms read window when maxWaitMs permits
+        final int readTimeoutMs = (int) Math.min(2000L, Math.max(400L, boundedWaitMs - 100L));
+        mainHandler.postDelayed(finishOnce, boundedWaitMs);
 
         new Thread(new Runnable() {
             @Override
@@ -882,14 +991,15 @@ public class CameraClient {
                     String portPart = (httpPort > 0 && httpPort != 80) ? (":" + httpPort) : "";
                     String base = "http://" + cameraIp + portPart + "/?custom=1&cmd=";
                     try {
-                        httpGetDirect(base + "3001&par=1", 700);
+                        httpGetDirectImpl(base + "3001&par=1", connectTimeoutMs, readTimeoutMs, null);
                         knownCameraMode = 1;
                     } catch (Exception ignored) {}
                     try {
                         Thread.sleep(80);
                     } catch (InterruptedException ignored) {}
                     try {
-                        httpGetDirect(base + "2001&par=1", 700);
+                        httpGetDirectImpl(base + "2001&par=1", connectTimeoutMs, readTimeoutMs, null);
+                        liveRecordingActive = true;
                         DebugLogger.log("CAM_EXIT", "Verified dashcam loop recording resumed prior to Wi-Fi teardown");
                     } catch (Exception e) {
                         DebugLogger.log("CAM_EXIT", "Pre-teardown recording resume notice: " + e.getMessage());
@@ -904,7 +1014,8 @@ public class CameraClient {
     /**
      * Take a snapshot photo.
      * Uses cmd=2017 (PIM movie snapshot trigger) when video stream/recording is active,
-     * falling back to cmd=1001 only if cmd=2017 is unsupported, and validates <Status>0</Status>.
+     * falling back to cmd=1001 (and temporary Photo Mode when 4K recording is paused),
+     * and validates <Status>0</Status>.
      */
     public void takeSnapshot(final Callback<Boolean> callback) {
         runAsync(new Runnable() {
@@ -939,6 +1050,34 @@ public class CameraClient {
                         }
                     }
 
+                    // 3. When recording is paused for 4K Live Preview, some NT966xx firmwares require Photo Mode (3001&par=0) for cmd=1001
+                    if (!captured && !liveRecordingActive && socType == SocType.NOVATEK && !teardownActive) {
+                        try {
+                            String rPhotoMode = sendCgiCommand("3001", "0");
+                            if (isCgiStatusOk(rPhotoMode)) {
+                                knownCameraMode = 0;
+                                Thread.sleep(120);
+                                String rPhotoSnap = sendCgiCommand("1001", null);
+                                DebugLogger.log("CAM_SNAP", "cmd=1001 (Photo Mode fallback) response: "
+                                        + (rPhotoSnap != null ? rPhotoSnap.trim() : "null"));
+                                if (isCgiStatusOk(rPhotoSnap)) {
+                                    captured = true;
+                                } else {
+                                    lastStatus = parseCgiStatus(rPhotoSnap);
+                                }
+                            }
+                        } catch (Exception e) {
+                            DebugLogger.log("CAM_SNAP", "Photo Mode snapshot fallback notice: " + e.getMessage());
+                        } finally {
+                            try {
+                                String rRestoreMovie = sendCgiCommand("3001", "1");
+                                if (isCgiStatusOk(rRestoreMovie)) knownCameraMode = 1;
+                                Thread.sleep(60);
+                                sendCgiCommand("2015", "1");
+                            } catch (Exception ignored) {}
+                        }
+                    }
+
                     if (!captured) {
                         throw new Exception("Camera rejected snapshot request (status=" + lastStatus + ")");
                     }
@@ -962,6 +1101,23 @@ public class CameraClient {
                 try {
                     boolean lockAccepted = false;
                     int lastErrStatus = Integer.MIN_VALUE;
+
+                    // If loop recording was paused (e.g. during 4K Live Preview), open an active clip segment first
+                    if (!liveRecordingActive) {
+                        try {
+                            if (knownCameraMode != 1) {
+                                String rMode = sendCgiCommand("3001", "1");
+                                if (isCgiStatusOk(rMode)) knownCameraMode = 1;
+                            }
+                            String rStart = sendCgiCommand("2001", "1");
+                            if (isCgiStatusOk(rStart) || parseCgiStatus(rStart) == -22) {
+                                liveRecordingActive = true;
+                            }
+                            Thread.sleep(250);
+                        } catch (Exception e) {
+                            DebugLogger.log("CAM_LOCK", "Pre-lock recording start notice: " + e.getMessage());
+                        }
+                    }
 
                     try {
                         String r2016 = sendCgiCommand("2016", null);
@@ -996,7 +1152,10 @@ public class CameraClient {
 
                     // Ensure loop recording remains active
                     try {
-                        sendCgiCommand("2001", "1");
+                        String rResume = sendCgiCommand("2001", "1");
+                        if (isCgiStatusOk(rResume) || parseCgiStatus(rResume) == -22) {
+                            liveRecordingActive = true;
+                        }
                     } catch (Exception ignored) {}
 
                     if (!lockAccepted) {
@@ -1085,16 +1244,33 @@ public class CameraClient {
 
     /**
      * Change camera movie recording resolution (cmd=2002)
-     * e.g., par=0 for 4K / highest, par=1 for 2K / 1080P
+     * e.g., par=0 or par=6 for 4K UHD, par=1 for 1080P FHD.
+     * When skipRestartForImmediateLiveStart is true, leaves recording/liveview stopped after
+     * cmd=2002 succeeds so an immediate prepareAndStartLiveView() call does not stop & restart
+     * the encoder twice back-to-back.
      */
     public void setVideoResolution(final int resolutionIndex, final Callback<Boolean> callback) {
+        setVideoResolution(resolutionIndex, false, callback);
+    }
+
+    public void setVideoResolution(final int resolutionIndex, final boolean skipRestartForImmediateLiveStart,
+                                   final Callback<Boolean> callback) {
         runAsync(new Runnable() {
             @Override
             public void run() {
                 if (teardownActive) return;
                 try {
                     // Stop recording & liveview before reconfiguring encoder resolution
-                    try { sendCgiCommand("2001", "0"); } catch (Exception ignored) {}
+                    try {
+                        String rStop = sendCgiCommand("2001", "0");
+                        if (parseCgiStatus(rStop) == -13 && !teardownActive) {
+                            Thread.sleep(350);
+                            rStop = sendCgiCommand("2001", "0");
+                        }
+                        if (isCgiStatusOk(rStop) || parseCgiStatus(rStop) == -22) {
+                            liveRecordingActive = false;
+                        }
+                    } catch (Exception ignored) {}
                     try { sendCgiCommand("2015", "0"); } catch (Exception ignored) {}
                     Thread.sleep(100);
 
@@ -1109,15 +1285,31 @@ public class CameraClient {
                     if (!isCgiStatusOk(resp)) {
                         // Ensure recording resumes even if resolution change was rejected
                         try { sendCgiCommand("2015", "1"); } catch (Exception ignored) {}
-                        try { sendCgiCommand("2001", "1"); } catch (Exception ignored) {}
+                        try {
+                            String rRecRestore = sendCgiCommand("2001", "1");
+                            if (isCgiStatusOk(rRecRestore) || parseCgiStatus(rRecRestore) == -22) {
+                                liveRecordingActive = true;
+                            }
+                        } catch (Exception ignored) {}
                         throw new Exception("Camera rejected resolution change (status=" + parseCgiStatus(resp) + ")");
+                    }
+
+                    if (skipRestartForImmediateLiveStart) {
+                        liveRecordingActive = false;
+                        postSuccess(callback, true);
+                        return;
                     }
 
                     // Re-start liveview encoder & loop recording
                     Thread.sleep(80);
                     try { sendCgiCommand("2015", "1"); } catch (Exception ignored) {}
                     Thread.sleep(60);
-                    try { sendCgiCommand("2001", "1"); } catch (Exception ignored) {}
+                    try {
+                        String rRec = sendCgiCommand("2001", "1");
+                        if (isCgiStatusOk(rRec) || parseCgiStatus(rRec) == -22) {
+                            liveRecordingActive = true;
+                        }
+                    } catch (Exception ignored) {}
 
                     postSuccess(callback, true);
                 } catch (Exception e) {
@@ -1150,7 +1342,16 @@ public class CameraClient {
                     }
 
                     // 1. Stop loop recording and liveview encoder cleanly before touching FAT filesystem
-                    try { sendCgiCommand("2001", "0"); } catch (Exception ignored) {}
+                    try {
+                        String rStop = sendCgiCommand("2001", "0");
+                        if (parseCgiStatus(rStop) == -13 && !teardownActive) {
+                            Thread.sleep(350);
+                            rStop = sendCgiCommand("2001", "0");
+                        }
+                        if (isCgiStatusOk(rStop) || parseCgiStatus(rStop) == -22) {
+                            liveRecordingActive = false;
+                        }
+                    } catch (Exception ignored) {}
                     Thread.sleep(150);
                     try { sendCgiCommand("2015", "0"); } catch (Exception ignored) {}
                     Thread.sleep(120);
@@ -1185,7 +1386,10 @@ public class CameraClient {
                     Thread.sleep(80);
                     try {
                         String rRec = sendCgiCommand("2001", "1");
-                        if (isCgiStatusOk(rRec)) knownCameraMode = 1;
+                        if (isCgiStatusOk(rRec) || parseCgiStatus(rRec) == -22) {
+                            knownCameraMode = 1;
+                            liveRecordingActive = true;
+                        }
                     } catch (Exception ignored) {}
 
                     if (!formatOk) {
