@@ -17,7 +17,8 @@ public class ClipItem implements Serializable {
     public final boolean isPhoto;
     public final String localFilePath;
     public final boolean isOemUsbClip;
-    public Boolean isHevc = null; // null = unprobed, true = HEVC (4K/2K), false = AVC (1080p)
+    public Boolean isHevc = null; // null = unprobed, true = high-res keyframe mode (HEVC or >1080p AVC), false = <=1080p AVC
+    public String mediaProfileDesc = null; // e.g. "AVC 3840x2160", "HEVC 3840x2160", "AVC 1920x1080"
 
     public ClipItem(String rawPath, long sizeBytes, String timeStr, int attr) {
         if (rawPath == null) rawPath = "";

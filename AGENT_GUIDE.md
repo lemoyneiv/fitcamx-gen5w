@@ -48,6 +48,7 @@ fitcamx/
 │       │   ├── ThemeManager.java        # Material Design 3 tonal palette & API 19 shape/state-layer engine
 │       │   ├── CameraClient.java        # Novatek CGI protocol client & state sync engine
 │       │   ├── VlcPlayerManager.java    # Embedded LibVLC player, RTSP stream playback & surface lifecycle
+│       │   ├── Live555Bridge.java       # Binds wlan0 IPv4 into live555 globals via libfitcamx_netfix.so
 │       │   ├── OemRearCamPlayer.java    # Gen5W OEM analog backup camera live viewer (@fitcamx.rearcam IPC)
 │       │   ├── UsbDashcamScanner.java   # gen5-RearDashcam USB .ts / Saved / Snapshots gallery indexer
 │       │   ├── WifiBridge.java          # Wi-Fi STA/SoftAP handover state machine
@@ -59,12 +60,15 @@ fitcamx/
 │       │   ├── DebugLogger.java         # RAM-only diagnostics aggregator & USB exporter
 │       │   └── ClipItem.java            # Video clip & still photo metadata entity
 │       └── main/jniLibs/armeabi-v7a/
-│           ├── libvlc.so                # LibVLC native engine (bundles FFmpeg / libavcodec)
+│           ├── libvlc.so                # LibVLC native engine (bundles FFmpeg / libavcodec / live555)
 │           ├── libvlcjni.so             # LibVLC JNI glue layer
+│           ├── libfitcamx_netfix.so     # KitKat JNI shim setting live555 Receiving/SendingInterfaceAddr
 │           └── libc++_shared.so         # LLVM C++ runtime
 ├── daemon/
 │   └── src/fitcamx/rearcam/        # Compiled & D8-dexed (min-api 19) into svc/rearcam.jar & bin/rearcam.jar
 │       ├── RearCamDaemon.java      # On-demand uid=1000/root OEM backup camera & /dev/admem reader (@fitcamx.rearcam)
+│       ├── BounceRunner.java       # On-demand uid=0 SoftAP Mode 2 + BT + projection bounce worker
+│       ├── BouncePolicy.java       # Pure-Java audio-focus, worker-refresh & multi-phone nudge policy
 │       ├── StandaloneRootDaemon.java # Lightweight uid=0 LFD1 broker (@fitcamx.root) for Standalone NEMESIS
 │       ├── StandaloneInstaller.java # App_process installer/updater/migrator/uninstaller for Standalone NEMESIS
 │       ├── CarBridge.java          # Reflective com.hkmc.* CarInfo / CameraManager / Reverse state bridge
@@ -75,7 +79,7 @@ fitcamx/
 │   ├── mod.json                    # HMG-API mod manifest (version, apps, services, wifi.client, usb)
 │   ├── open.sh                     # Launcher script for both HMG-API tile & NEMESIS Manager [app.0]
 │   ├── svc/
-│   │   ├── reboot.sh               # Root execution script for head unit reboot
+│   │   ├── reboot.sh               # Legacy root execution script for head unit reboot
 │   │   └── screenshot.sh           # Root execution script for atomic USB-only framebuffer PNG capture
 │   └── icons/                      # 128x128 PNG icons for Gen5W launcher (active + disabled)
 ├── nemesis/
@@ -121,7 +125,7 @@ Telechips TCC803x has 4x ARM Cortex-A7 cores @ 1.0 GHz with NO hardware HEVC dec
 
 ```java
 ArrayList<String> options = VlcPlayerManager.buildEngineOptions(mirrorHorizontal);
-// Includes: --rtsp-tcp, --avcodec-threads=4, --avcodec-hw=none, --avcodec-fast, --no-osd, --no-spu
+// Includes: --rtsp-tcp, --avcodec-threads=4, --avcodec-hw=none, --avcodec-fast, --no-osd, --no-spu, --verbose=1
 // Plus --video-filter=transform and --transform-type=hflip on mirrorLibVLC ONLY.
 // Note: Do NOT pass "--no-stats"; liveWatchdogRunnable reads IMedia.Stats to detect RTP/frame stalls.
 ```
@@ -129,15 +133,17 @@ ArrayList<String> options = VlcPlayerManager.buildEngineOptions(mirrorHorizontal
 #### Per-Media Profiles & Playback Engine:
 `VlcPlayerManager` initializes **standard (`libVLC`) and horizontally-flipped (`mirrorLibVLC`) `LibVLC` instances asynchronously** off the main UI thread (`FitcamxVlcInit`) and applies per-media decoding options via `Media.addOption(...)`:
 - **Live Stream (`startLiveStream`):**
+  - **`live555` `wlan0` Interface Binding (`Live555Bridge` + `libfitcamx_netfix.so`):** Even when `--rtsp-tcp` is enabled, `live555`'s `MediaSubsession::initiate()` calls `GroupsockHelper::ourIPAddress()`, which opens a UDP multicast socket to `228.67.43.91:15947` with a `5.0s` `select()` timeout per SDP track unless `ReceivingInterfaceAddr != INADDR_ANY`. On SELinux-enabled Ioniq 6 (`ecohmcse_us`) firmwares transitioning out of SoftAP Mode 2, `wlan0` drops multicast loopback and `getaddrinfo(hostname)` fails, stalling `live555` for `10.17s–15.22s` and aborting RTSP setup. `Live555Bridge` writes `wlan0`'s leased IPv4 address directly into `libvlc.so`'s exported `ReceivingInterfaceAddr` and `SendingInterfaceAddr` globals before every RTSP open (and resets to `INADDR_ANY` on teardown). Note: `libfitcamx_netfix.so` MUST be linked with `--no-rosegment -z now --hash-style=both` and **without** `-Bsymbolic` (`DF_SYMBOLIC`) for Android 4.4.2 KitKat Bionic compatibility.
   - **Horizontal Mirroring Invariant:** In VLC 3.0, `vout_thread_t` inherits `"video-filter"` and `"transform-type"` from `libvlc_media_player_t` → `LibVLC`, **NOT** from `input_thread_t` (`Media.addOption`). Live horizontal mirroring therefore binds `mirrorLivePlayer` (`mirrorLibVLC` with `--video-filter=transform` + `--transform-type=hflip`), while unmirrored Live View and SD Gallery playback bind `livePlayer` / `galleryPlayer` (`libVLC`).
   - Media options (`buildLiveMediaOptions`): `:rtsp-tcp`, `:network-caching=500`, `:ipv4-timeout=5000`, `:no-audio`, `:avcodec-threads=4`, `:avcodec-fast`, `:clock-jitter=0`, `:clock-synchro=0`.
   - **Keepalive & Anti-Freeze Self-Healing:** `MainActivity` dispatches idle Novatek `cmd=3016` heartbeats every 15s (`CameraClient.sendKeepaliveIfIdle`), while `VlcPlayerManager` polls `IMedia.Stats` (`readBytes`, `demuxReadBytes`, `decodedVideo`, `displayedPictures` via `didLiveStatsAdvance`, always calling `media.release()` in `finally`) every `250ms` with a `1200ms` stall threshold and tracks real video decode/Vout output (`didLastLiveSessionRenderVideo()`). **Never** reset `lastLiveProgressUptimeMs` on `Event.TimeChanged` or `PositionChanged` — VLC's monotonic `input_clock_t` continues firing `TimeChanged` for 10s while `live555` receives 0 RTP packets! Tier-1 recovery (`attempt == 1`) reconnects RTSP silently after `50ms` (`~170ms` connect time) without flashing `pbLiveLoading` or `"CONNECTING..."`, and unrecovered `auto-refresh` loops cap at `MAX_LIVE_AUTO_RECONNECT_ATTEMPTS = 6`.
   - **Single-ISP 4K Paused-Recording Live Preview Fallback:** Concurrent SD recording + RTSP live view (`cmd=2001&par=1`) remains the default. When a single-ISP 4K Novatek firmware starves RTSP whenever 4K recording runs (`2` consecutive post-connect stalls in `< 5000ms` or `0` rendered frames before `8000ms` health verification), `MainActivity` automatically switches to Paused-Recording 4K Live Preview (`prepareAndStartLiveView(..., resumeRecording = false)`), caches `cameraRequiresRecPauseFor4kLive` in RAM only for the current SSID session (zero `/data` writes), surfaces `○ REC PAUSED (4K LIVE)`, and guarantees `2200ms` bounded `cmd=2001&par=1` recording resumption on `1080P`, `VIEW_OEM_REAR`, `onStop`, and `Exit`.
   - *Note:* Live stream from Novatek is 720p/1080p H.264 (`rtsp://192.168.1.254/xxx.mov`), running smoothly with sub-second latency and automatic late-frame dropping if Wi-Fi jitters.
-- **1080p AVC Clips (`playGalleryClip` with `useKeyframeMode = false`):**
+- **<= 1080p AVC Clips (`playGalleryClip` with `useKeyframeMode = false`):**
   - Always defaults to **1.0x full framerate** on each new clip, and allows cycling `1.0x` → `0.5x` → `0.33x` → `1.0x`.
   - Media options: `:no-audio`, `:ts-seek-percent`, `:network-caching=1500` (`:file-caching=500` on USB), `:avcodec-threads=4`, `:avcodec-fast=1`.
-- **4K / 1440p HEVC Clips (`playGalleryClip` with `useKeyframeMode = true`):**
+- **4K / 1440p High-Res Clips — HEVC or >1080p H.264 (`playGalleryClip` with `useKeyframeMode = true`):**
+  - `TsHeaderSniffer.sniffMediaInfo()` inspects both the codec (`hvc1`/`hev1`/TS `0x24` vs `avc1`/TS `0x1B`) and pixel dimensions (`VisualSampleEntry` `width`/`height` at `+28..+31` in `.MP4`/`.MOV` and Annex-B H.264 SPS in `.TS`/`.M2TS`) so 4K/2K H.264 (`avc1`, `<Cmd>2023</Cmd><Status>0</Status>`) recordings exceeding `1920×1088` also enable keyframe-only decoding automatically.
   - Media options: `:no-audio`, `:ts-seek-percent`, `:no-ts-trust-pcr`, `:avcodec-skip-frame=3`, `:avcodec-skiploopfilter=4`, `:avcodec-hurry-up=1`, `:avcodec-threads=4`, `:avcodec-fast=1`.
   - **Rate Dilation (`0.33x` default, user-toggleable `0.33x` ↔ `0.5x`; `1.0x` disallowed):** `player.setRate(0.33f)` dilates presentation clock time by 3x so the 1.0 GHz Cortex-A7 CPU has ample wall-clock time to decode and render each HEVC keyframe without tripping VLC's lateness watchdog.
   - **Floating Smoked-Glass Overlays (`layout_gallery_top_overlay` & `layout_gallery_seek_overlay`):** Both the top action bar and bottom scrub/status card composite inside `frame_gallery_container` above the `SurfaceView` punch-through layer without shrinking video bounds (`1026×578` with clip list open; `1120×630` across the full `630px` app height with clip list hidden), auto-hiding after 3.5s of playback or photo display (tap viewport to toggle).
@@ -164,7 +170,7 @@ The dashcam communicates via HTTP GET queries to its internal web server (`http:
 | **Emergency Lock** | `?custom=1&cmd=2011&par=3` | Protect current recording | Flags recording as locked |
 | **Live Stream Control** | `?custom=1&cmd=2015&par=0` / `par=1` | Stop / Start Live View | Enables or stops RTSP encoder output |
 | **Live Stream URL Query** | `?custom=1&cmd=2019` | Query Active RTSP URL | Returns `<MovieLiveViewLink>rtsp://192.168.1.254/xxx.mov</MovieLiveViewLink>` |
-| **Live Channel Switch** | `?custom=1&cmd=3028&par=0\|1\|2` | Switch Live Camera Feed | `0`=Front, `1`=Rear, `2`=Dual PiP (`-256` or absent in `cmd=3014` indicates front-only firmware even when `cmd=2002` index `>= 6`) |
+| **Live Channel Switch** | `?custom=1&cmd=3028&par=0\|1\|2` | Switch Live Camera Feed | `0`=Front, `1`=Rear, `2`=Dual PiP (`-256` indicates front-only firmware; note `CM7053DW` dual-channel firmware accepts `cmd=3028&par=0` with `Status=0` and reports `<Cmd>3038</Cmd>` in `cmd=3014` while omitting `3028` from `cmd=3014`) |
 | **Camera Settings Sync** | `?custom=1&cmd=3014` | Query All Camera Settings | Returns XML list of current parameters |
 | **Set System Clock** | `?custom=1&cmd=3005&str=YYYY-MM-DD` + `cmd=3006&str=HH:MM:SS` | Sync RTC Date & Time | Sets camera internal clock to car clock |
 | **Directory Query** | `?custom=1&cmd=3015` | List Recorded Media on SD Card | Returns XML `<ALLFile>` index (`Movie`, `EMR`, `PHOTO`) |
@@ -227,12 +233,13 @@ The Gen5W head unit has a single physical Wi-Fi chipset. It cannot run in concur
 
 ---
 
-## 6. Root Daemon IPC, Adaptive Standalone NEMESIS & Head Unit Reboot (`HmgapidClient.java`)
+## 6. Root Daemon IPC, Connections Bounce & Adaptive Standalone NEMESIS (`HmgapidClient.java`)
 
 FITCAMX supports **both** HMG-API and standalone NEMESIS installations with full feature parity using a dual-socket **`LFD1`** client (`HmgapidClient`):
 - **Wire Protocol (`LFD1`):** `"LFD1"` (4 bytes ASCII), little-endian `u32 argc`, then `argc` × (`u32 len`, UTF-8 bytes); responses stream `'O'` output frames (`u32 len`, UTF-8 bytes) followed by `'X'` (`u32 len=4`, `u32 exitCode`).
-- **Primary Socket (`@hmgapid`):** Used when HMG-API is installed and manages `fitcamx-gen5w`. Dispatches `service-start rearcam`, `service-start screenshot`, and `service-start reboot`.
-- **Fallback Socket (`@fitcamx.root` — `StandaloneRootDaemon`):** Used automatically whenever `@hmgapid` is absent OR returns non-zero (e.g., if HMG-API was later installed alongside an un-migrated standalone NEMESIS package). `StandaloneRootDaemon` runs at 0% CPU in `LocalServerSocket.accept()`, writes zero bytes to `/data`, verifies kernel `SO_PEERCRED` UID (`0`, `1000`, or `fitcamx.app`), and executes only the fixed allowlist (`rearcam`, `screenshot`, `reboot`, `whoami`, `ping`, and `uid=0`-only `stop`).
+- **Primary Socket (`@hmgapid`):** Used when HMG-API is installed and manages `fitcamx-gen5w`. Dispatches `service-start rearcam`, `service-start screenshot`, and `service-start bounce`.
+- **Fallback Socket (`@fitcamx.root` — `StandaloneRootDaemon`):** Used automatically whenever `@hmgapid` is absent OR returns non-zero (e.g., if HMG-API was later installed alongside an un-migrated standalone NEMESIS package). `StandaloneRootDaemon` runs at 0% CPU in `LocalServerSocket.accept()`, writes zero bytes to `/data`, verifies kernel `SO_PEERCRED` UID (`0`, `1000`, or `fitcamx.app`), and executes only the fixed allowlist (`rearcam`, `screenshot`, `bounce`, `reboot`, `whoami`, `ping`, and `uid=0`-only `stop`).
+- **Exit & Bounce Connections (`BounceRunner` + `BouncePolicy`):** Holding `Exit` opens a clean 2-option modal (`Exit App` vs `Exit & Bounce Connections`, replacing full head-unit reboot). `BounceRunner` executes as an on-demand `uid=0` `app_process` worker out of `svc/rearcam.jar` / `bin/rearcam.jar` with `/dev` RAM-only crash markers (zero `/data` flash wear on standard installs): preserves active HFP phone calls and FM/USB audio, refreshes projection sink workers (`SIGTERM`), brings SoftAP Mode 2 (`setWifiApEnabledForConnectivity`) back up **before** cycling Bluetooth (`IBluetoothManager.disable(false)` / `enableNoAutoConnect()`) so the phone's `5 GHz` beacon is already live on HFP reconnect, nudges `PPService.connectPP` at `+6s` if needed, and hands foreground focus back only when no OEM rear/AVM camera is active.
 - **Adaptive NEMESIS Installer (`nemesis/scripts/*` + `StandaloneInstaller`):**
   - `postinstall.sh` checks `[ -x /system/bin/hmgapid ] && [ -f /data/hmgapi/uninstall.sh ]`. When HMG-API is present, it migrates any prior standalone state (`StandaloneInstaller migrate-to-hmgapi` preserving `/data/data/fitcamx.app`) and delegates to `hmgapid engine install` + `apply`.
   - When HMG-API is absent, `StandaloneInstaller` runs via `/system/bin/app_process` out of `bin/rearcam.jar`: enables Gen5W Wi-Fi client (`/system/etc/permissions/android.hardware.wifi.xml`, `#-/system/etc/permissions/android.hardware.wifi.xml` in `featurexml.cfg`, `persist.wifi.state=3`) with non-destructive backups in `/data/nemesis/backup/fitcamx.gen5w/` (preserving pre-existing Tilepad configs), streams `app/Fitcamx.apk` directly out of `mod/package.zip` to `/data/local/tmp` during `pm install -r` (saving ~18.4 MB of duplicate `/data` storage), and starts `bin/service.sh`.
@@ -263,7 +270,7 @@ python3 tests/run_tests.py
    - Compiles app and daemon Java source files with `javac --release 8` against `android-19/android.jar` and `libvlc.jar`.
    - Builds `svc/rearcam.jar` via `D8 --min-api 19` and shrinks app bytecode with `R8 --min-api 19` (`tools/proguard-rules.pro`) into Dalvik `classes.dex` (`dex 035`), stripping post-KitKat classes (`AudioDeviceCallback`, `androidx.lifecycle.Observer`, unused UI widgets).
 3. **Deflated Native Packaging & KitKat v1 Signing:**
-   - Injects `classes.dex` and `armeabi-v7a` native libraries (`libvlc.so`, `libvlcjni.so`, `libc++_shared.so`) into `unsigned.apk` with `ZIP_DEFLATED`, then runs `zipalign -f 4`.
+   - Injects `classes.dex` and `armeabi-v7a` native libraries (`libvlc.so`, `libvlcjni.so`, `libfitcamx_netfix.so`, `libc++_shared.so`) into `unsigned.apk` with `ZIP_DEFLATED`, then runs `zipalign -f 4`.
    - Resolves signing keys in priority order: CI Secrets (`FITCAMX_KEYSTORE_BASE64` + `FITCAMX_AUTHOR_KEY`) → persistent cloud keys (`~/.gemini/fitcamx-gen5w/keys/`) → local `../build/keys/` → automatic ephemeral dev keys (`~/.cache/fitcamx-dev-keys`, unless `--require-release-keys` is set).
    - Signs `Fitcamx.apk` with `apksigner` strictly using Android v1 JAR signature (`--v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false`).
 4. **Universal USB, HMG-API & Adaptive NEMESIS Packaging (`dist/`, untracked in git):**
@@ -292,5 +299,5 @@ python3 tests/run_tests.py
 | **DO** verify all UI changes look balanced on a 24:9 widescreen canvas. | **DON'T** hardcode 16:9 vertical paddings or center dialogs without bounds checking. |
 | **DO** release LibVLC views (`vlcVout.detachViews()`) before toggling visibility or switching activities. | **DON'T** let two `SurfaceView` instances remain visible simultaneously on KitKat. |
 | **DO** keep background logging off by default. | **DON'T** write periodic debug files to internal flash storage (`/data` or `/storage/emulated`). |
-| **DO** use `HmgapidClient` and `svc/reboot.sh` for root operations. | **DON'T** call `Runtime.getRuntime().exec("reboot")` expecting unprivileged shell permissions to succeed. |
+| **DO** use `HmgapidClient` and `BounceRunner` / `svc/screenshot.sh` for root operations. | **DON'T** call `Runtime.getRuntime().exec("reboot")` expecting unprivileged shell permissions to succeed. |
 | **DO** handle camera RTSP disconnections gracefully by falling back through candidate URL lists. | **DON'T** freeze the UI thread while attempting socket connections to `192.168.1.254`. |

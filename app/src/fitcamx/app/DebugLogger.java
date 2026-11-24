@@ -43,7 +43,7 @@ public class DebugLogger {
     };
 
     private static final LinkedList<String> logBuffer = new LinkedList<String>();
-    private static volatile String appVersion = "1.1.1";
+    private static volatile String appVersion = "1.1.2";
 
     public static String getAppVersion() {
         return appVersion;
@@ -289,6 +289,13 @@ public class DebugLogger {
                         android.net.wifi.WifiConfiguration conf = (android.net.wifi.WifiConfiguration) getApConfig.invoke(wm);
                         if (conf != null) {
                             sb.append("SoftAP SSID:     ").append(conf.SSID).append("\n");
+                            try {
+                                java.lang.reflect.Field connSsidField = conf.getClass().getField("ConnectivitySSID");
+                                Object connSsid = connSsidField.get(conf);
+                                if (connSsid != null) {
+                                    sb.append("ConnectivitySSID:").append(connSsid).append("\n");
+                                }
+                            } catch (Exception ignored) {}
                         }
                     } catch (Exception ignored) {}
                 }

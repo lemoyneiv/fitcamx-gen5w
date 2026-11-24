@@ -136,7 +136,8 @@ public final class StandaloneRootDaemon {
 
         if (("service-start".equals(op) || "service-restart".equals(op)) && argv.length == 2) {
             String svc = argv[1];
-            if (!"rearcam".equals(svc) && !"screenshot".equals(svc) && !"reboot".equals(svc)) {
+            if (!"rearcam".equals(svc) && !"screenshot".equals(svc)
+                    && !"bounce".equals(svc) && !"reboot".equals(svc)) {
                 outMsg.append("unknown service: ").append(svc).append('\n');
                 return 2;
             }
@@ -310,6 +311,18 @@ public final class StandaloneRootDaemon {
                 return spawnDetached(
                         "/system/bin/sh \"$1\" </dev/null >/dev/null 2>&1 &",
                         script.getAbsolutePath(), output);
+            }
+            if ("bounce".equals(serviceName)) {
+                File jar = new File(pkgDir, "bin/rearcam.jar");
+                if (!jar.isFile()) {
+                    output.append("missing bin/rearcam.jar\n");
+                    return 1;
+                }
+                return spawnDetached(
+                        "CLASSPATH=\"$1\" ANDROID_ROOT=/system ANDROID_DATA=/data "
+                        + "/system/bin/app_process /system/bin --nice-name=fitcamx.bounce "
+                        + "fitcamx.rearcam.BounceRunner </dev/null >/dev/null 2>&1 &",
+                        jar.getAbsolutePath(), output);
             }
             if ("reboot".equals(serviceName)) {
                 return triggerReboot(output);

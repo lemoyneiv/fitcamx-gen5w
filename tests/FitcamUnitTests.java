@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import fitcamx.app.*;
+import fitcamx.rearcam.BouncePolicy;
 import fitcamx.rearcam.CarBridge;
 import fitcamx.rearcam.PmapParser;
 import fitcamx.rearcam.PosixBridge;
@@ -226,8 +227,78 @@ public class FitcamUnitTests {
         byte[] movAvc1 = new byte[256];
         byte[] ftypAvc1 = "\0\0\0\u0014ftypqt  \0\0\u0002\0qt  \0\0\0\u0090moov\0\0\0\u0088trak\0\0\0\u0080stsd\0\0\0\0\0\0\0\u0001\0\0\0\u0070avc1\0\0\0\0\0\0\0\u0001".getBytes(StandardCharsets.ISO_8859_1);
         System.arraycopy(ftypAvc1, 0, movAvc1, 0, ftypAvc1.length);
-        check("Faststart MOV (ftyp + avc1) detected as CODEC_AVC",
-              TsHeaderSniffer.parseTsBuffer(movAvc1, movAvc1.length) == TsHeaderSniffer.CODEC_AVC);
+        // Set 1920x1080 VisualSampleEntry width/height at offsets +28..+31 from 'avc1'
+        int avc1Pos = ftypAvc1.length - 12;
+        movAvc1[avc1Pos + 28] = (byte) ((1920 >>> 8) & 0xFF);
+        movAvc1[avc1Pos + 29] = (byte) (1920 & 0xFF);
+        movAvc1[avc1Pos + 30] = (byte) ((1080 >>> 8) & 0xFF);
+        movAvc1[avc1Pos + 31] = (byte) (1080 & 0xFF);
+        TsHeaderSniffer.MediaInfo info1080Avc = TsHeaderSniffer.parseMediaInfo(movAvc1, movAvc1.length);
+        check("Faststart MOV (ftyp + avc1 1920x1080) detected as 1080p CODEC_AVC (isHighRes=false)",
+              info1080Avc.codec == TsHeaderSniffer.CODEC_AVC
+              && info1080Avc.width == 1920 && info1080Avc.height == 1080
+              && !info1080Avc.isHighRes());
+
+        // Jared's Ioniq 6 4K H.264 .MP4 case (avc1 at 3840x2160 and 2560x1440 -> isHighRes=true!)
+        byte[] mp4Avc4k = movAvc1.clone();
+        mp4Avc4k[avc1Pos + 28] = (byte) ((3840 >>> 8) & 0xFF);
+        mp4Avc4k[avc1Pos + 29] = (byte) (3840 & 0xFF);
+        mp4Avc4k[avc1Pos + 30] = (byte) ((2160 >>> 8) & 0xFF);
+        mp4Avc4k[avc1Pos + 31] = (byte) (2160 & 0xFF);
+        TsHeaderSniffer.MediaInfo info4kAvc = TsHeaderSniffer.parseMediaInfo(mp4Avc4k, mp4Avc4k.length);
+
+        byte[] mp4Avc2k = movAvc1.clone();
+        mp4Avc2k[avc1Pos + 28] = (byte) ((2560 >>> 8) & 0xFF);
+        mp4Avc2k[avc1Pos + 29] = (byte) (2560 & 0xFF);
+        mp4Avc2k[avc1Pos + 30] = (byte) ((1440 >>> 8) & 0xFF);
+        mp4Avc2k[avc1Pos + 31] = (byte) (1440 & 0xFF);
+        TsHeaderSniffer.MediaInfo info2kAvc = TsHeaderSniffer.parseMediaInfo(mp4Avc2k, mp4Avc2k.length);
+        check("4K (3840x2160) & 2K (2560x1440) H.264 avc1 MP4/MOV enable high-res 0.33x keyframe profile",
+              info4kAvc.codec == TsHeaderSniffer.CODEC_AVC
+              && info4kAvc.width == 3840 && info4kAvc.height == 2160
+              && info4kAvc.isHighRes()
+              && "AVC 3840x2160".equals(info4kAvc.describe())
+              && info2kAvc.width == 2560 && info2kAvc.height == 1440
+              && info2kAvc.isHighRes());
+
+        // MPEG-TS 0x1B H.264 with Annex-B High Profile SPS (3840x2160 vs cropped 1920x1080)
+        // SPS 3840x2160: profile=100(0x64), compat=0, level=51(0x33), sps_id=0, chroma=1, luma=0, chroma_bd=0, qp=0, scale=0 (0xAC),
+        // log2_fn=0, poc=0, log2_poc=0, ref=1, gaps=0, width_mbs_m1=239, height_mbs_m1=134, frame_only=1, direct8x8=1, crop=0
+        byte[] sps4kRbsp = new byte[] {
+            0x64, 0x00, 0x33, (byte) 0xAC, (byte) 0xE8, 0x03, (byte) 0xC0, 0x04, 0x3E, (byte) 0x80
+        };
+        // SPS 1920x1080: width_mbs_m1=119, height_mbs_m1=67 (1088), crop=1 (0,0,0,4 -> 1080)
+        byte[] sps1080Rbsp = new byte[] {
+            0x64, 0x00, 0x28, (byte) 0xAC, (byte) 0xE8, 0x07, (byte) 0x80, 0x22, 0x7E, 0x58
+        };
+        int[] dims4kSps = TsHeaderSniffer.parseH264SpsDimensions(sps4kRbsp, sps4kRbsp.length);
+        int[] dims1080Sps = TsHeaderSniffer.parseH264SpsDimensions(sps1080Rbsp, sps1080Rbsp.length);
+
+        byte[] pes4k = new byte[180];
+        // PES header (00 00 01 E0 00 00 80 00 00) + Annex-B SPS (00 00 01 67 <rbsp>) + PPS (00 00 01 68)
+        byte[] pesPrefix = new byte[] { 0, 0, 1, (byte) 0xE0, 0, 0, (byte) 0x80, 0, 0, 0, 0, 1, 0x67 };
+        System.arraycopy(pesPrefix, 0, pes4k, 0, pesPrefix.length);
+        System.arraycopy(sps4kRbsp, 0, pes4k, pesPrefix.length, sps4kRbsp.length);
+        pes4k[pesPrefix.length + sps4kRbsp.length + 2] = 1;
+        pes4k[pesPrefix.length + sps4kRbsp.length + 3] = 0x68;
+        byte[] videoPkt4k = new byte[188];
+        videoPkt4k[0] = 0x47;
+        videoPkt4k[1] = 0x41; // PUSI=1, PID=0x0100 (matches buildPmtSection elementary_PID)
+        videoPkt4k[2] = 0x00;
+        videoPkt4k[3] = 0x10; // payload only
+        System.arraycopy(pes4k, 0, videoPkt4k, 4, 180);
+
+        byte[] tsAvc4k = new byte[188 * 3];
+        System.arraycopy(pat, 0, tsAvc4k, 0, 188);
+        System.arraycopy(pmtAvc, 0, tsAvc4k, 188, 188);
+        System.arraycopy(videoPkt4k, 0, tsAvc4k, 376, 188);
+        TsHeaderSniffer.MediaInfo ts4kInfo = TsHeaderSniffer.parseMediaInfo(tsAvc4k, tsAvc4k.length);
+        check("MPEG-TS H.264 Annex-B SPS parses 3840x2160 (isHighRes=true) vs cropped 1920x1080 (isHighRes=false)",
+              dims4kSps != null && dims4kSps[0] == 3840 && dims4kSps[1] == 2160
+              && dims1080Sps != null && dims1080Sps[0] == 1920 && dims1080Sps[1] == 1080
+              && ts4kInfo.codec == TsHeaderSniffer.CODEC_AVC
+              && ts4kInfo.width == 3840 && ts4kInfo.height == 2160
+              && ts4kInfo.isHighRes());
 
         // Non-faststart MP4 (ftyp + 150 KB mdat + tail moov with hev1) -> local file & HTTP Range fallback
         final byte[] nonFaststartMp4 = new byte[150 * 1024];
@@ -1638,6 +1709,156 @@ public class FitcamUnitTests {
         }
     }
 
+    private static void testLive555BridgeCm7053dwAndBouncePolicy() throws Exception {
+        System.out.println("\n--- 19. Live555 Interface IPv4 Binding, CM7053DW Dual Detection & Connections Bounce Policy ---");
+
+        // 1. Live555Bridge IPv4 network-byte-order conversions & safety filters
+        int expected33 = ipv4ToLittleEndianInt(192, 168, 1, 33); // 0x2101a8c0
+        int expected254 = ipv4ToLittleEndianInt(192, 168, 1, 254); // 0xfe01a8c0
+        check("Live555Bridge converts wlan0 IPv4 addresses to network-byte-order in_addr_t matching DhcpInfo.ipAddress",
+              Live555Bridge.ipv4StringToNetOrderInt("192.168.1.33") == expected33
+              && Live555Bridge.ipv4StringToNetOrderInt(" 192.168.1.254 ") == expected254
+              && "192.168.1.33".equals(Live555Bridge.netOrderIntToIpv4String(expected33))
+              && "192.168.1.254".equals(Live555Bridge.netOrderIntToIpv4String(expected254)));
+
+        check("Live555Bridge rejects wildcard, loopback, broadcast, and malformed IPv4 strings so INADDR_ANY fallback remains safe",
+              Live555Bridge.ipv4StringToNetOrderInt(null) == 0
+              && Live555Bridge.ipv4StringToNetOrderInt("") == 0
+              && Live555Bridge.ipv4StringToNetOrderInt("0.0.0.0") == 0
+              && Live555Bridge.ipv4StringToNetOrderInt("127.0.0.1") == 0
+              && Live555Bridge.ipv4StringToNetOrderInt("255.255.255.255") == 0
+              && Live555Bridge.ipv4StringToNetOrderInt("192.168.1.999") == 0
+              && Live555Bridge.ipv4StringToNetOrderInt("192.168.1") == 0
+              && Live555Bridge.ipv4BytesToNetOrderInt(null) == 0
+              && Live555Bridge.ipv4BytesToNetOrderInt(new byte[] { 127, 0, 0, 1 }) == 0);
+
+        check("VlcPlayerManager.buildEngineOptions enables --verbose=1 for field warning diagnostics",
+              VlcPlayerManager.buildEngineOptions(false).contains("--verbose=1")
+              && VlcPlayerManager.buildEngineOptions(true).contains("--verbose=1"));
+
+        // 2. CM7053DW dual-channel status XML vs Jared/Toaster front-only 4K status XML
+        String drathoCm7053dwXml =
+                "<Function><Cmd>2002</Cmd><Status>1</Status>" +
+                "<Cmd>2004</Cmd><Status>1</Status>" +
+                "<Cmd>2007</Cmd><Status>1</Status>" +
+                "<Cmd>3038</Cmd><Status>0</Status></Function>";
+        String cm7053dw4kXml =
+                "<Function><Cmd>2002</Cmd><Status>6</Status><Cmd>3038</Cmd><Status>0</Status></Function>";
+        String jaredFrontOnlyXml =
+                "<Function><Cmd>2002</Cmd><Status>8</Status><Cmd>2007</Cmd><Status>1</Status></Function>";
+        String toasterFrontOnlyXml =
+                "<Function><Cmd>2002</Cmd><Status>6</Status><Cmd>2007</Cmd><Status>1</Status></Function>";
+
+        check("inferRearChannelFromStatusXml preserves rear probe on CM7053DW (3038 / verified 3028) while rejecting Jared & Toaster single-cam XMLs",
+              CameraClient.inferRearChannelFromStatusXml(drathoCm7053dwXml, false) == null
+              && CameraClient.inferRearChannelFromStatusXml(drathoCm7053dwXml, true) == null
+              && Boolean.TRUE.equals(CameraClient.inferRearChannelFromStatusXml(cm7053dw4kXml, false))
+              && Boolean.TRUE.equals(CameraClient.inferRearChannelFromStatusXml(toasterFrontOnlyXml, true))
+              && Boolean.FALSE.equals(CameraClient.inferRearChannelFromStatusXml(jaredFrontOnlyXml, false))
+              && Boolean.FALSE.equals(CameraClient.inferRearChannelFromStatusXml(toasterFrontOnlyXml, false)));
+
+        // Verify CameraClient.isChannelSelect3028Verified() tracks Status=0 on cmd=3028&par=0
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange ex) throws IOException {
+                String q = ex.getRequestURI().getRawQuery();
+                byte[] resp;
+                if (q != null && q.contains("cmd=3028")) {
+                    resp = "<Function><Cmd>3028</Cmd><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                } else if (q != null && q.contains("cmd=2019")) {
+                    resp = "<Function><Cmd>2019</Cmd><Status>0</Status><MovieLiveViewLink>rtsp://127.0.0.1/xxx.mov</MovieLiveViewLink></Function>"
+                            .getBytes(StandardCharsets.UTF_8);
+                } else {
+                    resp = "<Function><Status>0</Status></Function>".getBytes(StandardCharsets.UTF_8);
+                }
+                ex.sendResponseHeaders(200, resp.length);
+                OutputStream os = ex.getResponseBody();
+                os.write(resp);
+                os.close();
+            }
+        });
+        server.start();
+        CameraClient cam = new CameraClient("127.0.0.1");
+        cam.setSocType(CameraClient.SocType.NOVATEK, server.getAddress().getPort());
+        try {
+            check("CameraClient.isChannelSelect3028Verified starts false before cmd=3028 handshake",
+                  !cam.isChannelSelect3028Verified());
+            final CountDownLatch latch = new CountDownLatch(1);
+            cam.prepareAndStartLiveView(CameraClient.VIEW_FRONT, true, new CameraClient.Callback<List<String>>() {
+                @Override public void onSuccess(List<String> r) { latch.countDown(); }
+                @Override public void onError(Exception e) { latch.countDown(); }
+            });
+            boolean done = latch.await(5, TimeUnit.SECONDS);
+            check("CameraClient.isChannelSelect3028Verified becomes true once cmd=3028&par=0 returns Status=0",
+                  done && cam.isChannelSelect3028Verified());
+        } finally {
+            cam.shutdown();
+            server.stop(0);
+        }
+
+        // 3. BouncePolicy pure-Java safety invariants & StandaloneRootDaemon 'bounce' allowlist
+        check("BouncePolicy.shouldHoldHardwareMute mutes projection/BT audio glitches while preserving FM/USB media and manual user mute",
+              BouncePolicy.shouldHoldHardwareMute(BouncePolicy.MODE_NONE, 0, 0)
+              && BouncePolicy.shouldHoldHardwareMute(BouncePolicy.MODE_BT_AUDIO, BouncePolicy.MICOM_BT_AUDIO, 0)
+              && BouncePolicy.shouldHoldHardwareMute(BouncePolicy.MODE_CARPLAY, BouncePolicy.AUDIO_CARPLAY, 0)
+              && BouncePolicy.shouldHoldHardwareMute(BouncePolicy.MODE_PROJECTION_GPM, BouncePolicy.AUDIO_PROJECTION_GPM, 0)
+              && !BouncePolicy.shouldHoldHardwareMute(BouncePolicy.MODE_PROJECTION_GPM, BouncePolicy.AUDIO_PROJECTION_GPM, 1)
+              && !BouncePolicy.shouldHoldHardwareMute(12 /* FM Radio */, 2, 0));
+
+        check("BouncePolicy.isAllowedWorkerTarget & shouldRefreshWorker strictly allowlist projection sinks and block PPService/system_server",
+              BouncePolicy.isAllowedWorkerTarget("com.google.android.projection.sink")
+              && BouncePolicy.isAllowedWorkerTarget("com.daudio.app.dipo")
+              && !BouncePolicy.isAllowedWorkerTarget("com.daudio.app.phoneprojection")
+              && !BouncePolicy.isAllowedWorkerTarget("system_server")
+              && BouncePolicy.shouldRefreshWorker("com.google.android.projection.sink", false, false, false)
+              && BouncePolicy.shouldRefreshWorker("com.daudio.app.dipo", false, false, false)
+              && BouncePolicy.shouldRefreshWorker("com.google.android.projection.sink", true, false, false)
+              && !BouncePolicy.shouldRefreshWorker("com.daudio.app.dipo", true, false, false));
+
+        check("BouncePolicy.selectReconnectNudgeTarget & selectProjectionTypeForNudge prioritize live cabin HFP phone over stale MACs",
+              "AA:BB:CC:11:22:33".equals(BouncePolicy.selectReconnectNudgeTarget(
+                      "aa-bb-cc-11-22-33", "DE:AD:BE:EF:00:01", "11:22:33:44:55:66", "", "", ""))
+              && "11:22:33:44:55:66".equals(BouncePolicy.selectReconnectNudgeTarget(
+                      "00:00:00:00:00:00", "", "11:22:33:44:55:66", "", "", ""))
+              && BouncePolicy.selectProjectionTypeForNudge("AA:BB:CC:11:22:33", true, 0, "", "", 0) == BouncePolicy.PP_TYPE_CARPLAY
+              && BouncePolicy.selectProjectionTypeForNudge("AA:BB:CC:11:22:33", false, BouncePolicy.PP_TYPE_GPM, "", "", 0) == BouncePolicy.PP_TYPE_GPM
+              && BouncePolicy.redactMac("AA:BB:CC:11:22:33").startsWith("bt#")
+              && "none".equals(BouncePolicy.redactMac("")));
+
+        check("BouncePolicy.decideFocusShortcut & isCameraActive defer projection shortcut while OEM rear/AVM camera is on screen",
+              BouncePolicy.isCameraActive(true, 0, "")
+              && BouncePolicy.isCameraActive(false, 0, "com.hkmc.app.avm")
+              && BouncePolicy.FOCUS_DEFER_CAMERA.equals(BouncePolicy.decideFocusShortcut(false, true, 0, true))
+              && BouncePolicy.SHORTCUT_GPM.equals(BouncePolicy.decideFocusShortcut(false, true, 0, false))
+              && BouncePolicy.SHORTCUT_CARPLAY.equals(BouncePolicy.decideFocusShortcut(true, false, 0, false))
+              && "".equals(BouncePolicy.decideFocusShortcut(false, true, BouncePolicy.MODE_PROJECTION_GPM, false)));
+
+        check("BouncePolicy radio state guards & concurrency cmdline detector match fitcamx.bounce and hmgapi-bounce",
+              BouncePolicy.isBounceProcessCmdline("fitcamx.bounce")
+              && BouncePolicy.isBounceProcessCmdline("hmgapi-bounce:soft")
+              && !BouncePolicy.isBounceProcessCmdline("fitcamx.rearcam")
+              && BouncePolicy.shouldInvokeBluetoothEnable(BouncePolicy.BT_STATE_OFF)
+              && !BouncePolicy.shouldInvokeBluetoothEnable(BouncePolicy.BT_STATE_TURNING_ON)
+              && !BouncePolicy.shouldInvokeBluetoothEnable(BouncePolicy.BT_STATE_ON)
+              && BouncePolicy.isSoftApReadyForReenable(BouncePolicy.WIFI_AP_STATE_DISABLED)
+              && !BouncePolicy.isSoftApReadyForReenable(BouncePolicy.WIFI_AP_STATE_DISABLING)
+              && BouncePolicy.isTransientHmgapidBusyError("hmgapid is busy"));
+
+        final List<String> launched = new ArrayList<String>();
+        StandaloneRootDaemon.ServiceLauncher bounceMock = new StandaloneRootDaemon.ServiceLauncher() {
+            @Override public int startService(String s, StringBuilder out) { launched.add(s); out.append("started\n"); return 0; }
+            @Override public int triggerReboot(StringBuilder out) { return 0; }
+            @Override public void requestShutdown() {}
+        };
+        int rcStartBounce = StandaloneRootDaemon.dispatchCommand(
+                new String[] { "service-start", "bounce" }, 10188, 10188, bounceMock, new StringBuilder());
+        int rcRestartBounce = StandaloneRootDaemon.dispatchCommand(
+                new String[] { "service-restart", "bounce" }, 10188, 10188, bounceMock, new StringBuilder());
+        check("StandaloneRootDaemon allowlists 'bounce' service-start & service-restart for fitcamx.app",
+              rcStartBounce == 0 && rcRestartBounce == 0 && launched.size() == 2 && "bounce".equals(launched.get(0)));
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== FITCAMX Gen5W Automated Java Unit & Integration Test Suite ===\n");
         testDebugLoggerRamOnly();
@@ -1658,6 +1879,7 @@ public class FitcamUnitTests {
         testFormatSdCardAndRearProbe();
         testStandaloneNemesisAndRootDaemon();
         test4kLivePreviewFallbackAndSinglePassResolution();
+        testLive555BridgeCm7053dwAndBouncePolicy();
 
         System.out.println("\n=== Java Test Summary: " + passed + " passed, " + failed + " failed ===");
         if (failed > 0) {

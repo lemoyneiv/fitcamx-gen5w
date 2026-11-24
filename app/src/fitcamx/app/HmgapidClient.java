@@ -204,6 +204,52 @@ public final class HmgapidClient {
     }
 
     /**
+     * Request ~5s Wi-Fi SoftAP, Bluetooth & wireless projection soft-reset via @hmgapid
+     * or @fitcamx.root, falling back to standalone dev.lemoyne.bounce broadcast if installed.
+     */
+    public static boolean bounceConnections(android.content.Context context) {
+        DebugLogger.log("SYSTEM", "Requesting connections bounce via root service...");
+        long[] backoffs = new long[] { 80L, 160L, 320L };
+        int rc = -1;
+        for (int i = 0; i <= backoffs.length; i++) {
+            rc = callWithTimeout(4000, "service-start", "bounce");
+            if (rc == 0) {
+                DebugLogger.log("SYSTEM", "service-start bounce succeeded");
+                return true;
+            }
+            if (rc != 75 || i >= backoffs.length) {
+                break;
+            }
+            try {
+                Thread.sleep(backoffs[i]);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        rc = callWithTimeout(4000, "service-restart", "bounce");
+        if (rc == 0) {
+            DebugLogger.log("SYSTEM", "service-restart bounce succeeded");
+            return true;
+        }
+
+        // Fallback: if standalone hmgapi-bounce app is installed, trigger its broadcast receiver
+        if (context != null) {
+            try {
+                context.getPackageManager().getPackageInfo("dev.lemoyne.bounce", 0);
+                android.content.Intent intent = new android.content.Intent("dev.lemoyne.bounce.ACTION_BOUNCE");
+                intent.setPackage("dev.lemoyne.bounce");
+                context.sendBroadcast(intent);
+                DebugLogger.log("SYSTEM", "Dispatched fallback broadcast to dev.lemoyne.bounce");
+                return true;
+            } catch (Throwable ignored) {}
+        }
+
+        DebugLogger.log("SYSTEM", "connections bounce attempts failed (rc=" + rc + ")");
+        return false;
+    }
+
+    /**
      * Request root framebuffer screenshot capture to attached USB via manual service.
      */
     public static boolean requestScreenshot() {

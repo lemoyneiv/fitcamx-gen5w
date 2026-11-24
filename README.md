@@ -4,7 +4,7 @@
 ![Architecture](https://img.shields.io/badge/Architecture-armeabi--v7a-orange.svg)
 ![Engine](https://img.shields.io/badge/Video%20Engine-LibVLC%203.3.4-red.svg)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v1.1.1-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v1.1.2-brightgreen.svg)](https://github.com/lemoyneiv/fitcamx-gen5w/releases)
 
 A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis **Gen5W** navigation head units (10.25" and 12.3" displays). Stream live video from **FITCAMX** integrated Wi-Fi dashcams, view your vehicle's OEM analog backup camera, review SD card & USB dashcam clips, and export footage directly to a USB flash drive — with zero external codec packs required and full support for **both HMG-API and standalone NEMESIS** setups.
 
@@ -61,7 +61,7 @@ A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis 
 - A Gen5W head unit rooted with **[HMG-API](https://github.com/VysseCodes/HMG-API)** (`v1.0.0+`) **or** **NEMESIS Manager** (*HMG-API is optional — standalone NEMESIS with Tilepad or any 3rd-party launcher is fully supported*).
 
 ### Universal USB Installer (Single Download for Both HMG-API & NEMESIS)
-1. Download [**`fitcamx-gen5w-v1.1.1-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.1.1/fitcamx-gen5w-v1.1.1-usb.zip) from the [Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/latest).
+1. Download [**`fitcamx-gen5w-v1.1.2-usb.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.1.2/fitcamx-gen5w-v1.1.2-usb.zip) from the [Releases page](https://github.com/lemoyneiv/fitcamx-gen5w/releases/latest).
 2. Extract the archive to the **root (top level)** of a FAT32- or exFAT-formatted USB flash drive so `HMGAPI/`, `packages/`, and `NEMESIS.data` sit at the root of the drive.
 3. Insert the USB drive into the vehicle's multimedia USB port and install using whichever manager is on your head unit:
 
@@ -70,10 +70,10 @@ A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis 
 - Adds the native **FITCAMX** tile directly to the stock Gen5W home screen.
 
 #### Option B: Install via NEMESIS Manager (Works With *or* Without HMG-API)
-- Open **NEMESIS Manager** and approve the USB installation prompt (or install [**`fitcamx-gen5w-v1.1.1-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.1.1/fitcamx-gen5w-v1.1.1-nemesis-package.zip) directly).
+- Open **NEMESIS Manager** and approve the USB installation prompt (or install [**`fitcamx-gen5w-v1.1.2-nemesis-package.zip`**](https://github.com/lemoyneiv/fitcamx-gen5w/releases/download/v1.1.2/fitcamx-gen5w-v1.1.2-nemesis-package.zip) directly).
 - The adaptive installer automatically detects your environment:
   - **HMG-API installed:** Registers the mod in HMG-API with the stock Gen5W home-screen launcher tile.
-  - **No HMG-API installed (Standalone NEMESIS):** Automatically enables Gen5W Wi-Fi client mode with safe `/system` backups (preserving pre-existing Tilepad Wi-Fi settings), installs **FITCAMX** for **Tilepad** / 3rd-party launchers, and runs a zero-wear root service broker so OEM Car Backup Camera live view, `gen5-RearDashcam` coexistence, USB screenshots, and **Exit & Reboot** work with full feature parity. Restart the head unit once if prompted to finish enabling Wi-Fi.
+  - **No HMG-API installed (Standalone NEMESIS):** Automatically enables Gen5W Wi-Fi client mode with safe `/system` backups (preserving pre-existing Tilepad Wi-Fi settings), installs **FITCAMX** for **Tilepad** / 3rd-party launchers, and runs a zero-wear root service broker so OEM Car Backup Camera live view, `gen5-RearDashcam` coexistence, USB screenshots, and **Exit & Bounce Connections** work with full feature parity. Restart the head unit once if prompted to finish enabling Wi-Fi.
 
 ---
 
@@ -82,7 +82,7 @@ A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis 
 ### 1. Connecting & Wi-Fi Handover
 - **Automatic Connection:** Launching FITCAMX automatically switches the head unit from SoftAP mode to Wi-Fi client mode, connects to your FITCAMX camera, syncs the camera's clock to the car, and starts live video without interrupting dashcam recording (on single-ISP 4K cameras whose firmware cannot encode 4K SD video and RTSP simultaneously, FITCAMX automatically switches to **4K Live Preview** and resumes 4K recording on exit).
 - **Custom Password or SSID:** If you changed your FITCAMX Wi-Fi password or SSID, tap **Wi-Fi Setup** when prompted (or long-press **Rescan** at any time) to choose your network and save credentials.
-- **Clean Exit:** Tapping **Exit** (or backgrounding the app) automatically restores the head unit's prior Wi-Fi/SoftAP configuration so wireless phone projection reconnects seamlessly.
+- **Clean Exit & Bounce Connections:** Tapping **Exit** (or backgrounding the app) automatically restores the head unit's prior Wi-Fi/SoftAP configuration. **Long-pressing Exit** offers **Exit & Bounce Connections**, which performs a ~5-second SoftAP, Bluetooth, and wireless projection soft-reset (without rebooting the head unit) if your phone's wireless projection needs a fresh handshake.
 
 ### 2. Live View & Camera Controls
 - **View Switching:** Tap **View** on the right-hand camera rail to cycle live feeds:
@@ -93,7 +93,7 @@ A native widescreen dashcam viewer and controller for Hyundai, Kia, and Genesis 
 
 ### 3. SD Card & USB Footage Playback
 - Switch to **SD Card** in the left sidebar to browse indexed footage across **All**, **Front**, **Rear**, **Emergency**, and **Photos**.
-- **Smooth Playback on Gen5W Hardware:** Rear 1080p H.264 clips play at full 30 fps; high-bitrate 4K/2K HEVC front clips use an optimized high-resolution keyframe review mode engineered for the head unit's ARM Cortex-A7 processor. Audio is muted automatically so vehicle radio/media playback is undisturbed.
+- **Smooth Playback on Gen5W Hardware:** Standard 1080p H.264 clips play at full 30 fps; high-bitrate 4K/2K front clips (both HEVC and H.264) use an optimized high-resolution keyframe review mode engineered for the head unit's ARM Cortex-A7 processor. Audio is muted automatically so vehicle radio/media playback is undisturbed.
 - **Full-Height Viewing & Export:** Collapse the clip list to expand video to the full `1120×630` viewport with floating scrub controls (`Show List` restores the browser). Tap **USB** on any clip card (or **Save to USB** on the playback bar) to export directly to `/storage/usb0/DashcamFootage/` with live transfer speed and progress.
 
 ### 4. Themes, Screenshots, Diagnostics & Advanced Options
@@ -125,7 +125,7 @@ If you have `gen5-RearDashcam` installed to record your car's backup camera to U
 
 ## Supported Vehicles & Hardware
 
-- **Verified Vehicles:** Actively tested and verified on **2023 Hyundai Ioniq 5 AWD** (standard analog backup camera) and **Kia EV6** (360° SVM trim).
+- **Verified Vehicles:** Actively tested and verified on **2023 Hyundai Ioniq 5 AWD** (standard analog backup camera), **Hyundai Ioniq 6** (`ecohmcse_us`), and **Kia EV6** (360° SVM trim).
 - **Compatible Gen5W Platform:** Designed for Hyundai, Kia, and Genesis vehicles equipped with **Gen5W** 10.25" or 12.3" widescreen navigation head units running Android 4.4.2 KitKat (API 19, ARMv7), including Gen5W models of Ioniq 5, Ioniq 6, Kona, Tucson, Santa Fe, Sonata, Palisade, EV6, EV9, Niro, Sportage, K5, Carnival, Telluride, GV60, G80, GV70, and GV80.
 - **Supported Dashcams:** FITCAMX OEM-style integrated Wi-Fi dashcams (Novatek NT96670 / NT96672 / NT96675 series, default IP `192.168.1.254`).
 

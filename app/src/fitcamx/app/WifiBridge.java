@@ -450,11 +450,22 @@ public class WifiBridge {
             initialNetworkId = (cur != null) ? cur.getNetworkId() : -1;
 
             String apSsid = (initialApConfig != null && initialApConfig.SSID != null) ? initialApConfig.SSID : "null";
+            String connSsid = null;
+            if (initialApConfig != null) {
+                try {
+                    java.lang.reflect.Field f = initialApConfig.getClass().getField("ConnectivitySSID");
+                    Object v = f.get(initialApConfig);
+                    if (v instanceof String && !((String) v).isEmpty()) {
+                        connSsid = (String) v;
+                    }
+                } catch (Throwable ignored) {}
+            }
             String modeStr = (initialApMode == 2) ? "2 (Connectivity / Projection)" :
                              (initialApMode == 1 ? "1 (In-Car Consumer Hotspot)" : String.valueOf(initialApMode));
 
             DebugLogger.log("WIFI_STATE", "Recorded initial state: ApEnabled=" + initialApEnabled
                     + ", ApMode=" + modeStr + ", ApSSID=" + apSsid
+                    + (connSsid != null ? (", ConnectivitySSID=" + connSsid) : "")
                     + ", WifiEnabled=" + initialWifiEnabled + ", NetworkId=" + initialNetworkId);
 
             // Log available AP reflection methods on WifiManager for deep diagnostic tracking
@@ -1404,6 +1415,7 @@ public class WifiBridge {
                         diagMsg = "No HTTP response; assuming " + finalCameraIp + ". [" + probeLog.toString() + "]";
                     }
 
+                    Live555Bridge.bindInterfaceIp(myIp);
                     final String fullDetails = "Local IP: " + myIp + " | Netmask: " + netmask + " | GW: " + gatewayIp + " | Camera: " + finalSocType.displayName + " (" + finalCameraIp + ")";
                     DebugLogger.log("WIFI_CONN", fullDetails);
 
@@ -1604,6 +1616,53 @@ public class WifiBridge {
         restoreWifiStateInternal("exit");
     }
 
+    /**
+     * Cleanly disconnects the dashcam client profile (retaining its saved networkId for fast future
+     * reconnects) and disables station Wi-Fi so the root BounceRunner can reset SoftAP & Bluetooth
+     * without a redundant SoftAP UP -> DOWN -> UP cycle or interference from onDestroy().
+     */
+    public void disconnectDashcamForBounce() {
+        if (isRestoring) return;
+        isRestoring = true;
+        isProbingCamera = false;
+        isConnectingToTarget = false;
+        isFastConnectingSaved = false;
+        lastProbeVerified = false;
+
+        stopScanLoop();
+        stopWatchdogs();
+        unregisterReceivers();
+        Live555Bridge.clearInterfaceBinding();
+        DebugLogger.log("WIFI_RESTORE", "Disconnecting dashcam Wi-Fi for connections bounce...");
+
+        int dashcamNetId = connectedNetworkId;
+        if (dashcamNetId != -1) {
+            try {
+                wifiManager.disableNetwork(dashcamNetId);
+                wifiManager.disconnect();
+                DebugLogger.log("WIFI_RESTORE", "Disabled dashcam network profile (retained id=" + dashcamNetId + " for fast reconnect)");
+            } catch (Exception ignored) {}
+            connectedNetworkId = -1;
+        }
+        try {
+            if (wifiManager != null && wifiManager.isWifiEnabled()) {
+                wifiManager.setWifiEnabled(false);
+            }
+        } catch (Exception ignored) {}
+
+        if (listener != null) {
+            listener.onDisconnected();
+        }
+    }
+
+    /**
+     * Fallback restore invoked only if root bounce dispatch fails after disconnectDashcamForBounce().
+     */
+    public void forceFallbackRestore() {
+        isRestoring = false;
+        restoreWifiStateInternal("bounce fallback");
+    }
+
     public void shutdown() {
         stopScanLoop();
         stopWatchdogs();
@@ -1622,6 +1681,7 @@ public class WifiBridge {
         stopScanLoop();
         stopWatchdogs();
         unregisterReceivers();
+        Live555Bridge.clearInterfaceBinding();
         notifyStatus("Restoring previous Wi-Fi state...");
         DebugLogger.log("WIFI_RESTORE", "Restoring Wi-Fi state (reason=" + reason + ")...");
 

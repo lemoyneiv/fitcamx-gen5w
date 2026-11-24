@@ -54,6 +54,12 @@ public class VlcPlayerManager {
         } catch (Throwable t) {
             Log.w(TAG, "Pre-load libvlcjni warning: " + t.getMessage());
         }
+        try {
+            System.loadLibrary("fitcamx_netfix");
+            Log.i(TAG, "Loaded libfitcamx_netfix.so successfully");
+        } catch (Throwable t) {
+            Log.w(TAG, "Pre-load libfitcamx_netfix warning: " + t.getMessage());
+        }
     }
 
     public static final long LIVE_OPEN_TIMEOUT_MS = 8500L;
@@ -206,6 +212,8 @@ public class VlcPlayerManager {
         // Disable OSD & subtitle font scanning (avoids missing /system/etc/fonts.xml errors on Gen5W)
         options.add("--no-osd");
         options.add("--no-spu");
+        // Emit VLC_MSG_ERR + VLC_MSG_WARN to logcat for field diagnostics without debug spam
+        options.add("--verbose=1");
         if (mirrorHorizontal) {
             options.add("--video-filter=transform");
             options.add("--transform-type=hflip");
@@ -722,6 +730,10 @@ public class VlcPlayerManager {
                     targetPlayer.setMedia(media);
                     media.release();
 
+                    if (streamUrl != null && streamUrl.regionMatches(true, 0, "rtsp://", 0, 7)) {
+                        Live555Bridge.refreshFromWlan0BeforeRtsp();
+                    }
+
                     liveStopNeeded = true;
                     DebugLogger.log("VLC_LIVE", "Starting live RTSP/TCP"
                             + (useMirrorEngine ? " [MIRRORED hflip]" : "") + ": " + streamUrl);
@@ -954,7 +966,7 @@ public class VlcPlayerManager {
                         media.addOption(":avcodec-hurry-up=1");
                         media.addOption(":avcodec-threads=4");
                         media.addOption(":avcodec-fast=1");
-                        DebugLogger.log("VLC_GAL", "Front high-res HEVC profile applied: keyframe-only (rate=" + targetGalleryRate + "x)");
+                        DebugLogger.log("VLC_GAL", "Front high-res keyframe profile applied (rate=" + targetGalleryRate + "x)");
                     } else {
                         if (isHttp) {
                             media.addOption(":network-caching=1500");

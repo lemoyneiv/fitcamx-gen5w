@@ -15,7 +15,6 @@ import android.net.wifi.ScanResult;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.PowerManager;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.util.DisplayMetrics;
@@ -486,7 +485,8 @@ public class MainActivity extends Activity {
                             // 4. Infer rear Fitcamx channel from cmd=3014 status XML only when not yet known
                             // for this SSID (so SD-card ground truth from Gallery is not overwritten on dual-capable
                             // units whose rear camera cable is unplugged, unless firmware omits 3028 altogether).
-                            Boolean inferredRear = CameraClient.inferRearChannelFromStatusXml(xml);
+                            Boolean inferredRear = CameraClient.inferRearChannelFromStatusXml(
+                                    xml, cameraClient.isChannelSelect3028Verified());
                             if (Boolean.FALSE.equals(inferredRear)
                                     || (inferredRear != null && !hasKnownFitcamxRearForSsid(ssid))) {
                                 saveKnownFitcamxRearForSsid(ssid, inferredRear.booleanValue());
@@ -3611,25 +3611,25 @@ public class MainActivity extends Activity {
             return;
         }
 
-        // Sniff media header in background thread (<20ms) to detect whether this specific file is HEVC or AVC
+        // Sniff media header in background thread (<20ms) to detect codec and pixel dimensions
         new Thread(new Runnable() {
             @Override
             public void run() {
-                int codec = TsHeaderSniffer.sniffCodec(playUri);
+                TsHeaderSniffer.MediaInfo info = TsHeaderSniffer.sniffMediaInfo(playUri);
                 final boolean is4kFront;
-                if (codec == TsHeaderSniffer.CODEC_HEVC) {
-                    clip.isHevc = true;
-                    is4kFront = true;
-                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 4K/2K HEVC");
-                } else if (codec == TsHeaderSniffer.CODEC_AVC) {
-                    clip.isHevc = false;
-                    is4kFront = false;
-                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as 1080p AVC");
+                if (info.codec != TsHeaderSniffer.CODEC_UNKNOWN) {
+                    is4kFront = info.isHighRes();
+                    clip.isHevc = is4kFront;
+                    clip.mediaProfileDesc = info.describe();
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffed as " + info.describe()
+                            + " -> " + (is4kFront ? "high-res keyframe profile" : "1080p full-rate profile"));
                 } else {
                     // Fallback to active camera mode if sniffer cannot read header
                     is4kFront = !is1080pMode;
                     clip.isHevc = is4kFront;
-                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffer uncertain; falling back to camera mode: " + (is4kFront ? "4K HEVC" : "1080p AVC"));
+                    clip.mediaProfileDesc = is4kFront ? "4K/2K" : "1080p";
+                    DebugLogger.log("SNIFFER", "Clip " + clip.filename + " sniffer uncertain; falling back to camera mode: "
+                            + (is4kFront ? "4K/2K keyframe" : "1080p full-rate"));
                 }
 
                 runOnUiThread(new Runnable() {
@@ -3647,11 +3647,11 @@ public class MainActivity extends Activity {
     private void startGalleryPlaybackInternal(final ClipItem clip, final String playUri, final boolean isFront,
                                               final boolean is4kFront, final boolean isLocalUsb,
                                               final float startSeekPos, final boolean resetRate, final int loadGen) {
-        final boolean isHevcClip = isFront && is4kFront;
-        currentGalleryClipIsHevc = isHevcClip;
+        final boolean isHighResClip = isFront && is4kFront;
+        currentGalleryClipIsHevc = isHighResClip;
         final float chosenRate = resetRate
-                ? VlcPlayerManager.getDefaultGalleryRate(isHevcClip)
-                : VlcPlayerManager.sanitizeGalleryRate(vlcPlayerManager.getGalleryRate(), isHevcClip);
+                ? VlcPlayerManager.getDefaultGalleryRate(isHighResClip)
+                : VlcPlayerManager.sanitizeGalleryRate(vlcPlayerManager.getGalleryRate(), isHighResClip);
         if (btnPlaybackRate != null) {
             btnPlaybackRate.setEnabled(true);
         }
@@ -3674,8 +3674,10 @@ public class MainActivity extends Activity {
                         showGallerySeekOverlay(true);
                         float activeRate = vlcPlayerManager.getGalleryRate();
                         updatePlaybackRateButton(activeRate);
-                        addDiagLog("VLC playing " + (isHevcClip ? "front 4K HEVC" : (isFront ? "front 1080p" : "rear 1080p"))
-                                + " (" + activeRate + "x)");
+                        String desc = (clip.mediaProfileDesc != null && !clip.mediaProfileDesc.isEmpty())
+                                ? ("front " + clip.mediaProfileDesc)
+                                : (isHighResClip ? "front 4K/2K" : (isFront ? "front 1080p" : "rear 1080p"));
+                        addDiagLog("VLC playing " + desc + " (" + activeRate + "x)");
                     }
                 });
             }
@@ -4290,11 +4292,11 @@ public class MainActivity extends Activity {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("Exit FITCAMX");
         if (HmgapidClient.isRootServiceCachedAvailable()) {
-            builder.setMessage("Select an exit option:\n\n[Exit & Reboot]\nRestores Wi-Fi and reboots the head unit.\n\n[Exit]\nRestores Wi-Fi and returns to head unit menus.");
-            builder.setPositiveButton("Exit & Reboot", new DialogInterface.OnClickListener() {
+            builder.setMessage("Select an exit option:\n\n[Exit & Bounce Connections]\nResets Wi-Fi, Bluetooth & wireless projection (~5s) for a clean phone reconnect.\n\n[Exit]\nRestores previous Wi-Fi state and returns to head unit menus.");
+            builder.setPositiveButton("Exit & Bounce Connections", new DialogInterface.OnClickListener() {
                 @Override
                 public void onClick(DialogInterface dialog, int which) {
-                    exitWithReboot();
+                    exitWithBounceConnections();
                 }
             });
             builder.setNeutralButton("Exit", new DialogInterface.OnClickListener() {
@@ -4450,81 +4452,49 @@ public class MainActivity extends Activity {
         return super.onKeyDown(keyCode, event);
     }
 
-    private void exitWithReboot() {
+    private void exitWithBounceConnections() {
         if (isExiting) return;
         isExiting = true;
         liveRequestGeneration++;
         galleryLoadGeneration++;
         lifecycleHandler.removeCallbacks(backgroundSuspendRunnable);
-        DebugLogger.log("EXIT", "User selected Exit & Reboot");
-        Toast.makeText(this, "Restoring Wi-Fi and rebooting head unit...", Toast.LENGTH_SHORT).show();
+        DebugLogger.log("EXIT", "User selected Exit & Bounce Connections");
+        Toast.makeText(this, "Bouncing Wi-Fi & Bluetooth connections...", Toast.LENGTH_SHORT).show();
 
         stopOemBackupStream();
         if (vlcPlayerManager != null) vlcPlayerManager.release();
         if (usbDownloader != null) usbDownloader.cancelDownload();
 
-        final Runnable finishRebootTeardown = new Runnable() {
+        final Context appCtx = getApplicationContext();
+        final WifiBridge wb = wifiBridge;
+        final Runnable finishBounceTeardown = new Runnable() {
             @Override
             public void run() {
-                if (wifiBridge != null) {
-                    wifiBridge.restoreAndExit();
+                if (wb != null) {
+                    wb.disconnectDashcamForBounce();
                 }
-                lifecycleHandler.postDelayed(new Runnable() {
+                new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        performHeadUnitReboot();
-                        finish();
+                        final boolean ok = HmgapidClient.bounceConnections(appCtx);
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!ok && wb != null) {
+                                    wb.forceFallbackRestore();
+                                }
+                                finish();
+                            }
+                        });
                     }
-                }, 750L);
+                }, "FitcamxExitBounce").start();
             }
         };
 
         if (isConnected && cameraClient != null) {
-            cameraClient.ensureRecordingBeforeTeardown(finishRebootTeardown, 2200L);
+            cameraClient.ensureRecordingBeforeTeardown(finishBounceTeardown, 2200L);
         } else {
-            finishRebootTeardown.run();
-        }
-    }
-
-    private void performHeadUnitReboot() {
-        DebugLogger.log("SYSTEM", "Initiating head unit reboot...");
-
-        // 1. Direct call to HMG-API root daemon via local abstract socket
-        boolean hmgapidOk = HmgapidClient.reboot();
-        if (hmgapidOk) {
-            return;
-        }
-
-        // 2. Android standard PowerManager reboot
-        try {
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm != null) {
-                pm.reboot(null);
-            }
-        } catch (Throwable t1) {
-            DebugLogger.log("SYSTEM", "PowerManager.reboot notice: " + t1.getMessage());
-        }
-
-        // 3. Fallback direct shell execution
-        try {
-            Runtime.getRuntime().exec(new String[]{"/system/bin/reboot"});
-        } catch (Throwable t2) {
-            try {
-                Runtime.getRuntime().exec("reboot");
-            } catch (Throwable t3) {
-                DebugLogger.log("SYSTEM", "Shell reboot failed: " + t3.getMessage());
-            }
-        }
-
-        // 4. Broadcast reboot action
-        try {
-            Intent intent = new Intent(Intent.ACTION_REBOOT);
-            intent.putExtra("nowait", 1);
-            intent.putExtra("interval", 1);
-            intent.putExtra("window", 0);
-            sendBroadcast(intent);
-        } catch (Throwable t4) {
-            DebugLogger.log("SYSTEM", "ACTION_REBOOT broadcast notice: " + t4.getMessage());
+            finishBounceTeardown.run();
         }
     }
 

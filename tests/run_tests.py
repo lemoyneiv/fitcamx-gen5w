@@ -171,7 +171,7 @@ def verify_dex_and_jni():
     daemon_dex_file = os.path.join(BUILD_DIR, "daemon_dex", "classes.dex")
     daemon_classes = _audit_dex_against_api19(daemon_dex_file, "svc/rearcam.jar", "Lfitcamx/rearcam/", api19_classes)
     check(
-        "svc/rearcam.jar bundles RearCamDaemon, PmapParser, StandaloneRootDaemon & StandaloneInstaller DEX classes",
+        "svc/rearcam.jar bundles RearCamDaemon, PmapParser, StandaloneRootDaemon, StandaloneInstaller, BounceRunner & BouncePolicy",
         all(
             c in daemon_classes
             for c in (
@@ -179,11 +179,14 @@ def verify_dex_and_jni():
                 "Lfitcamx/rearcam/PmapParser;",
                 "Lfitcamx/rearcam/StandaloneRootDaemon;",
                 "Lfitcamx/rearcam/StandaloneInstaller;",
+                "Lfitcamx/rearcam/BounceRunner;",
+                "Lfitcamx/rearcam/BouncePolicy;",
             )
         ),
     )
 
     required_jni_classes = [
+        "Lfitcamx/app/Live555Bridge;",
         "Lorg/videolan/libvlc/AWindow;",
         "Lorg/videolan/libvlc/Dialog;",
         "Lorg/videolan/libvlc/LibVLC;",
@@ -203,7 +206,51 @@ def verify_dex_and_jni():
         "Lorg/videolan/libvlc/interfaces/IMedia$Track;",
     ]
     missing_jni = [c for c in required_jni_classes if c not in defined_classes]
-    check("All libvlcjni.so & libvlc.so JNI target classes preserved in shrunk DEX", len(missing_jni) == 0, str(missing_jni))
+    check("All libvlcjni.so, libvlc.so & libfitcamx_netfix.so JNI target classes preserved in shrunk DEX", len(missing_jni) == 0, str(missing_jni))
+
+
+def _audit_kitkat_elf32(so_bytes: bytes) -> tuple[bool, str]:
+    """Verifies Android 4.4.2 KitKat Bionic ELF32 constraints on libfitcamx_netfix.so."""
+    if len(so_bytes) < 52 or so_bytes[:4] != b"\x7fELF" or so_bytes[4] != 1 or so_bytes[5] != 1:
+        return False, "not 32-bit little-endian ELF"
+    e_phoff, _, _, _, e_phentsize, e_phnum, _, _, _ = struct.unpack("<IIIHHHHHH", so_bytes[28:52])
+    pt_load_count = 0
+    dyn_off = 0
+    dyn_sz = 0
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, p_offset, _, _, p_filesz, _, _, _ = struct.unpack("<IIIIIIII", so_bytes[off:off + 32])
+        if p_type == 1:  # PT_LOAD
+            pt_load_count += 1
+        elif p_type == 2:  # PT_DYNAMIC
+            dyn_off, dyn_sz = p_offset, p_filesz
+    if pt_load_count > 2 or dyn_off == 0:
+        return False, f"pt_load_count={pt_load_count}, dyn_off={dyn_off}"
+
+    has_dt_hash = False
+    dt_flags = 0
+    for off in range(dyn_off, dyn_off + dyn_sz, 8):
+        d_tag, d_val = struct.unpack("<iI", so_bytes[off:off + 8])
+        if d_tag == 0:  # DT_NULL
+            break
+        if d_tag == 4:  # DT_HASH (mandatory on KitKat Bionic)
+            has_dt_hash = True
+        elif d_tag == 30:  # DT_FLAGS
+            dt_flags = d_val
+    if not has_dt_hash:
+        return False, "missing DT_HASH (0x4) required by KitKat Bionic"
+    if (dt_flags & 0x2) != 0:  # DF_SYMBOLIC rejected by KitKat Bionic
+        return False, f"forbidden DF_SYMBOLIC in DT_FLAGS=0x{dt_flags:x}"
+    required_syms = (
+        b"libvlc.so\x00",
+        b"Java_fitcamx_app_Live555Bridge_nativeSetInterfaceAddr\x00",
+        b"ReceivingInterfaceAddr\x00",
+        b"SendingInterfaceAddr\x00",
+    )
+    for sym in required_syms:
+        if sym not in so_bytes:
+            return False, f"missing dynamic symbol/SONAME {sym!r}"
+    return True, f"PT_LOAD={pt_load_count}, DT_HASH=true, DT_FLAGS=0x{dt_flags:x}"
 
 
 def verify_apk_and_elf():
@@ -223,6 +270,7 @@ def verify_apk_and_elf():
         "lib/armeabi-v7a/libvlc.so",
         "lib/armeabi-v7a/libvlcjni.so",
         "lib/armeabi-v7a/libc++_shared.so",
+        "lib/armeabi-v7a/libfitcamx_netfix.so",
     }
     apk_size = os.path.getsize(apk_path)
     check(
@@ -232,7 +280,7 @@ def verify_apk_and_elf():
     )
     with zipfile.ZipFile(apk_path, "r") as z:
         names = set(z.namelist())
-        check("APK bundles all 3 required armeabi-v7a native libraries", expected_sos.issubset(names))
+        check("APK bundles all 4 required armeabi-v7a native libraries", expected_sos.issubset(names))
         all_deflated = all(z.getinfo(so_name).compress_type == zipfile.ZIP_DEFLATED for so_name in expected_sos)
         check("All bundled .so libraries use ZIP_DEFLATED compression inside Fitcamx.apk", all_deflated)
         all_arm32 = True
@@ -244,6 +292,9 @@ def verify_apk_and_elf():
             if hdr[:4] != b"\x7fELF" or hdr[4] != 1 or e_machine != 40:
                 all_arm32 = False
         check("All bundled .so libraries are 32-bit little-endian ARM (EM_ARM=40)", all_arm32)
+        netfix_ok, netfix_detail = _audit_kitkat_elf32(z.read("lib/armeabi-v7a/libfitcamx_netfix.so"))
+        check("libfitcamx_netfix.so satisfies KitKat Bionic linker rules (<=2 PT_LOAD, DT_HASH, no DF_SYMBOLIC, live555 symbols)",
+              netfix_ok, netfix_detail)
 
 
 def read_png_dimensions(path: str):
@@ -330,6 +381,13 @@ def verify_operational_invariants():
           and rearcam_svc.get("user") == "system"
           and rearcam_svc.get("start") == "manual"
           and rearcam_svc.get("restart") is False)
+    bounce_svc = next((s for s in mod_obj.get("services", []) if isinstance(s, dict) and s.get("name") == "bounce"), {})
+    check("mod/mod.json declares manual root bounce jar service (svc/rearcam.jar -> BounceRunner)",
+          bounce_svc.get("jar") == "svc/rearcam.jar"
+          and bounce_svc.get("class") == "fitcamx.rearcam.BounceRunner"
+          and bounce_svc.get("user") == "root"
+          and bounce_svc.get("start") == "manual"
+          and bounce_svc.get("restart") is False)
 
     # 4. Launcher icons 128x128
     tile_dim = read_png_dimensions(os.path.join(BASE_DIR, "mod", "icons", "tile.png"))

@@ -58,6 +58,7 @@ public class CameraClient {
     private volatile String cachedDynamicRtspUrl = null;
     private volatile boolean liveRecordingActive = true;
     private volatile boolean supportsChannelSelect3028 = true;
+    private volatile boolean verifiedChannelSelect3028 = false;
     private volatile boolean teardownActive = false;
     private volatile HttpURLConnection activeConnection = null;
     private volatile long lastCgiActivityUptimeMs = 0L;
@@ -100,7 +101,12 @@ public class CameraClient {
         cachedDynamicRtspUrl = null;
         liveRecordingActive = true;
         supportsChannelSelect3028 = true;
+        verifiedChannelSelect3028 = false;
         lastCgiActivityUptimeMs = 0L;
+    }
+
+    public boolean isChannelSelect3028Verified() {
+        return verifiedChannelSelect3028 && supportsChannelSelect3028;
     }
 
     /**
@@ -352,10 +358,12 @@ public class CameraClient {
                         try {
                             String rFast3028 = sendCgiCommand("3028", String.valueOf(viewMode));
                             if (isCgiStatusOk(rFast3028)) {
+                                verifiedChannelSelect3028 = true;
                                 switchedFast = true;
                                 DebugLogger.log("CAM_LIVE", "Fast non-disruptive channel switch succeeded for " + modeName);
                             } else if (parseCgiStatus(rFast3028) == -256) {
                                 supportsChannelSelect3028 = false;
+                                verifiedChannelSelect3028 = false;
                             }
                         } catch (Exception ignored) {}
                     }
@@ -408,8 +416,11 @@ public class CameraClient {
                             try {
                                 String r3028 = sendCgiCommand("3028", String.valueOf(viewMode));
                                 DebugLogger.log("CAM_LIVE", "cmd=3028&par=" + viewMode + " (" + modeName + " select) response: " + (r3028 != null ? r3028.trim() : "null"));
-                                if (parseCgiStatus(r3028) == -256) {
+                                if (isCgiStatusOk(r3028)) {
+                                    verifiedChannelSelect3028 = true;
+                                } else if (parseCgiStatus(r3028) == -256) {
                                     supportsChannelSelect3028 = false;
+                                    verifiedChannelSelect3028 = false;
                                 }
                             } catch (Exception e) {
                                 DebugLogger.log("CAM_LIVE", "cmd=3028 failed: " + e.getMessage());
@@ -791,6 +802,10 @@ public class CameraClient {
      * - Otherwise -> null (requires directory or cmd=3028 probe).
      */
     public static Boolean inferRearChannelFromStatusXml(String statusXml) {
+        return inferRearChannelFromStatusXml(statusXml, false);
+    }
+
+    public static Boolean inferRearChannelFromStatusXml(String statusXml, boolean channelSelect3028Verified) {
         if (statusXml == null || statusXml.isEmpty()) return null;
         Matcher m2002 = Pattern.compile("(?i)<Cmd>\\s*2002\\s*</Cmd>\\s*<Status>\\s*(-?\\d+)\\s*</Status>").matcher(statusXml);
         if (!m2002.find()) {
@@ -798,16 +813,22 @@ public class CameraClient {
         }
 
         Matcher m3028 = Pattern.compile("(?i)<Cmd>\\s*3028\\s*</Cmd>(?:\\s*<Status>\\s*(-?\\d+)\\s*</Status>)?").matcher(statusXml);
-        if (!m3028.find()) {
-            return Boolean.FALSE;
-        }
-        String st3028 = m3028.group(1);
-        if (st3028 != null) {
-            try {
-                if (Integer.parseInt(st3028) == -256) {
-                    return Boolean.FALSE;
-                }
-            } catch (NumberFormatException ignored) {}
+        if (m3028.find()) {
+            String st3028 = m3028.group(1);
+            if (st3028 != null) {
+                try {
+                    if (Integer.parseInt(st3028) == -256) {
+                        return Boolean.FALSE;
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+        } else {
+            // Some dual-channel firmwares (e.g. CM7053DW) accept cmd=3028&par=0 (Status=0) and
+            // include dual-cam parameter 3038 in cmd=3014 while omitting 3028 from cmd=3014.
+            boolean hasDualTag3038 = Pattern.compile("(?i)<Cmd>\\s*3038\\s*</Cmd>").matcher(statusXml).find();
+            if (!channelSelect3028Verified && !hasDualTag3038) {
+                return Boolean.FALSE;
+            }
         }
 
         try {
